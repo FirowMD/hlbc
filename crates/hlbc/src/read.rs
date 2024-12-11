@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Seek};
 use std::path::Path;
 use std::str::from_utf8;
 
@@ -23,7 +23,7 @@ impl Bytecode {
 
     /// Load the bytecode from any source. This method will skip bytes until the magic header is found.
     /// This also means it will read bytes indefinitely if it can't find the magic header.
-    pub fn deserialize(mut r: impl BufRead) -> Result<Self> {
+    pub fn deserialize(mut r: (impl BufRead + Seek)) -> Result<Self> {
         // Search for the magic header
         let finder = memchr::memmem::Finder::new("HLB");
         loop {
@@ -41,7 +41,7 @@ impl Bytecode {
 
     /// Load the bytecode from any source.
     /// Must be a valid hashlink bytecode binary that starts with the magic header.
-    fn deserialize_exact(r: &mut impl Read) -> Result<Self> {
+    fn deserialize_exact(r: &mut (impl Read + Seek)) -> Result<Self> {
         let mut header = [0u8; 3];
         r.read_exact(&mut header)?;
         if header != [b'H', b'L', b'B'] {
@@ -312,7 +312,8 @@ impl TypeFun {
 }
 
 impl TypeObj {
-    pub(crate) fn read(r: &mut impl Read) -> Result<Self> {
+    pub(crate) fn read(r: &mut (impl Read + Seek)) -> Result<Self> {
+        let foffset = r.stream_position()? as usize;
         let name = RefString::read(r)?;
         let super_ = read_vari(r)?;
         let global = RefGlobal::read(r)?;
@@ -336,6 +337,7 @@ impl TypeObj {
             bindings.insert(RefField::read(r)?, RefFun::read(r)?);
         }
         Ok(TypeObj {
+            foffset,
             name,
             super_: if super_ < 0 {
                 None
@@ -352,7 +354,7 @@ impl TypeObj {
 }
 
 impl Type {
-    pub(crate) fn read(r: &mut impl Read) -> Result<Self> {
+    pub(crate) fn read(r: &mut (impl Read + Seek)) -> Result<Self> {
         use crate::Type::*;
         match r.read_u8()? {
             0 => Ok(Void),
@@ -414,8 +416,10 @@ impl Type {
 }
 
 impl Native {
-    pub(crate) fn read(r: &mut impl Read) -> Result<Self> {
+    pub(crate) fn read(r: &mut (impl Read + Seek)) -> Result<Self> {
+        let foffset = r.stream_position()? as usize;
         Ok(Native {
+            foffset,
             lib: RefString::read(r)?,
             name: RefString::read(r)?,
             t: RefType::read(r)?,
@@ -425,7 +429,8 @@ impl Native {
 }
 
 impl Function {
-    pub(crate) fn read(r: &mut impl Read, has_debug: bool, version: u8) -> Result<Self> {
+    pub(crate) fn read(r: &mut (impl Read + Seek), has_debug: bool, version: u8) -> Result<Self> {
+        let foffset = r.stream_position()? as usize;
         let t = RefType::read(r)?;
         let findex = RefFun::read(r)?;
         let nregs = read_varu(r)? as usize;
@@ -490,6 +495,7 @@ impl Function {
             name: RefString(0),
             t,
             findex,
+            foffset,
             regs,
             ops,
             debug_info,

@@ -107,6 +107,7 @@ pub struct TypeFun {
 /// Common type for [Type::Obj] and [Type::Struct]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeObj {
+    pub foffset: usize,
     pub name: RefString,
     pub super_: Option<RefType>,
     pub global: RefGlobal,
@@ -284,6 +285,7 @@ impl RefType {
 /// A native function reference. Contains no code but indicates the library from where to load it.
 #[derive(Debug, Clone)]
 pub struct Native {
+    pub foffset: usize,
     /// Native function name
     pub name: RefString,
     /// Native lib name
@@ -327,6 +329,7 @@ pub struct Function {
     /// Type of the function : args and return type. Guaranteed to be a [TypeFun].
     pub t: RefType,
     pub findex: RefFun,
+    pub foffset: usize,
     /// The types of the registers used by this function
     pub regs: Vec<RefType>,
     /// Instructions
