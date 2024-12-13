@@ -298,13 +298,15 @@ impl ObjField {
 }
 
 impl TypeFun {
-    pub(crate) fn read(r: &mut impl Read) -> Result<Self> {
+    pub(crate) fn read(r: &mut (impl Read + Seek)) -> Result<Self> {
+        let foffset = r.stream_position()? as usize;
         let nargs = r.read_u8()?;
         let mut args = Vec::with_capacity(nargs as usize);
         for _ in 0..nargs {
             args.push(RefType::read(r)?);
         }
         Ok(TypeFun {
+            foffset,
             args,
             ret: RefType::read(r)?,
         })

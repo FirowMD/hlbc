@@ -100,6 +100,7 @@ pub struct RefEnumConstruct(pub usize);
 /// Common type for [Type::Fun] and [Type::Method]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeFun {
+    pub foffset: usize,
     pub args: Vec<RefType>,
     pub ret: RefType,
 }
