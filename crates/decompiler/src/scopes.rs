@@ -98,6 +98,10 @@ impl Scopes {
 
     pub(crate) fn advance(&mut self) {
         let mut stmt = None;
+        if self.scopes.is_empty() {
+            return;
+        }
+        
         for i in (0..self.scopes.len()).rev() {
             if matches!(self.scopes[i].ty, ScopeType::Len(len) if len == 1) {
                 let mut scope = self.scopes.remove(i);
@@ -106,9 +110,11 @@ impl Scopes {
                 }
                 // Exception for Switch where a switch scope can be closed with a switch case open
                 if let ScopeData::Switch { cases, .. } = &mut scope.data {
-                    let case = self.scopes.remove(i);
-                    if let ScopeData::SwitchCase { pattern } = case.data {
-                        cases.push((pattern, case.stmts));
+                    if i < self.scopes.len() {
+                        let case = self.scopes.remove(i);
+                        if let ScopeData::SwitchCase { pattern } = case.data {
+                            cases.push((pattern, case.stmts));
+                        }
                     }
                 }
                 stmt = Some(scope.make_stmt());
