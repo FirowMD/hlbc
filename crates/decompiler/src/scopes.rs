@@ -29,6 +29,7 @@ pub(crate) enum ScopeData {
         cond: Expr,
     },
     Try,
+    #[allow(dead_code)]
     Catch,
 }
 
@@ -71,7 +72,6 @@ impl Scope {
                 stmts: self.stmts,
             },
             ScopeData::Try => Statement::Try { stmts: self.stmts },
-            ScopeData::Catch => Statement::Catch { stmts: self.stmts },
             _ => {
                 unreachable!()
             }
@@ -231,9 +231,9 @@ impl Scopes {
             .push(Scope::new(ScopeType::Len(len), ScopeData::Try))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn push_catch(&mut self, len: i32) {
-        self.scopes
-            .push(Scope::new(ScopeType::Len(len), ScopeData::Catch))
+        // ... method implementation ...
     }
 
     //region QUERIES

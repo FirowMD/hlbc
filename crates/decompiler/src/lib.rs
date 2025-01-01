@@ -295,11 +295,12 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Result<Vec<Statement>, S
             &Opcode::Throw { exc } | &Opcode::Rethrow { exc } => {
                 state.push_stmt(Statement::Throw(state.expr(exc)));
             }
-            &Opcode::Trap { exc, offset } => {
-                state.scopes.push_try(offset + 1);
+            &Opcode::Trap { _exc: _, offset } => {
+                state.push_stmt(stmt(Expr::Unknown("trap".into())));
+                state.push_scope(ScopeData::Try, *offset);
             }
-            &Opcode::EndTrap { exc } => {
-                // TODO try catch
+            &Opcode::EndTrap { _exc: _ } => {
+                state.pop_scope();
             }
             //endregion
 
@@ -670,22 +671,22 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Result<Vec<Statement>, S
             //endregion
 
             //region ENUMS
-            &Opcode::EnumAlloc { dst, construct } => {
+            &Opcode::EnumAlloc { dst, _construct } => {
                 state.push_expr(
                     i,
                     dst,
-                    Expr::EnumConstr(f.regtype(dst), construct, Vec::new()),
+                    Expr::EnumConstr(f.regtype(dst), _construct, Vec::new()),
                 );
             }
             Opcode::MakeEnum {
                 dst,
-                construct,
+                _construct,
                 args,
             } => {
                 state.push_expr(
                     i,
                     *dst,
-                    Expr::EnumConstr(f.regtype(*dst), *construct, state.args_expr(args)),
+                    Expr::EnumConstr(f.regtype(*dst), _construct, state.args_expr(args)),
                 );
             }
             &Opcode::EnumIndex { dst, value } => {
@@ -700,7 +701,7 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Result<Vec<Statement>, S
             &Opcode::EnumField {
                 dst,
                 value,
-                construct,
+                _construct,
                 field,
             } => {
                 state.push_expr(
@@ -711,7 +712,7 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Result<Vec<Statement>, S
                 );
             }
             &Opcode::SetEnumField { value, field, src } => match state.expr(value) {
-                Expr::Variable(r, name) => {
+                Expr::Variable(_r, _name) => {
                     state.push_stmt(Statement::Assign {
                         declaration: false,
                         variable: Expr::Field(

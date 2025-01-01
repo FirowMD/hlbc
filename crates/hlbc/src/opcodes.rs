@@ -38,7 +38,7 @@ pub enum Opcode {
     /// `dst = <true|false>`
     Bool {
         dst: Reg,
-        value: InlineBool,
+        _value: InlineBool,
     },
     /// Get a byte array from the constant pool
     ///
@@ -738,13 +738,13 @@ pub enum Opcode {
         /// https://github.com/HaxeFoundation/hashlink/blob/733b6a14a0a7e7cfba6c21cdf0ee03595cafafb4/src/jit.c#L4310
         /// https://www.felixcloutier.com/x86/prefetchh
         /// https://www.felixcloutier.com/x86/prefetchw
-        mode: InlineInt,
+        _mode: InlineInt,
     },
     /// Inline x86 assembly
     Asm {
         /// https://github.com/HaxeFoundation/hashlink/blob/733b6a14a0a7e7cfba6c21cdf0ee03595cafafb4/src/jit.c#L4334
-        mode: InlineInt,
-        value: InlineInt,
+        _mode: InlineInt,
+        _value: InlineInt,
         /// Warning ! Only non-zero values indicates valid reg. Register index is reg-1.
         reg: Reg,
     },
