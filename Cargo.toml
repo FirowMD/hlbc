@@ -3,7 +3,6 @@ members = [
     "crates/derive",
     "crates/hlbc",
     "crates/decompiler",
-    "crates/cli",
     "crates/indexing"
 ]
 resolver = "2"
