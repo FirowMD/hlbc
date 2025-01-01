@@ -278,8 +278,23 @@ impl RefType {
         self.as_obj(ctx).map(|obj| &obj.fields[field.0])
     }
 
-    pub fn method<'a>(&self, meth: usize, ctx: &'a Bytecode) -> Option<&'a ObjProto> {
-        self.as_obj(ctx).map(|obj| &obj.protos[meth])
+    pub fn method<'a>(&self, method_idx: usize, ctx: &'a Bytecode) -> Option<&'a ObjProto> {
+        match ctx.get(*self) {
+            Type::Obj(obj) => {
+                if method_idx >= obj.protos.len() {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "Warning: Attempted to access method at index {} but object only has {} methods",
+                        method_idx,
+                        obj.protos.len()
+                    );
+                    None
+                } else {
+                    obj.protos.get(method_idx)
+                }
+            }
+            _ => None,
+        }
     }
 }
 
