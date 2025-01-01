@@ -176,7 +176,7 @@ impl<'c> DecompilerState<'c> {
 
 /// Decompile a function code to a list of [Statement]s.
 /// This works by analyzing each opcodes in order while trying to reconstruct scopes, contexts and intents.
-pub fn decompile_code(code: &Bytecode, f: &Function) -> Vec<Statement> {
+pub fn decompile_code(code: &Bytecode, f: &Function) -> Result<Vec<Statement>, String> {
     let mut state = DecompilerState::new(code, f);
 
     let iter = f.ops.iter().enumerate();
@@ -490,7 +490,7 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Vec<Statement> {
                 state.push_expr(
                     i,
                     dst,
-                    Expr::Closure(fun, decompile_code(code, fun.as_fn(code).unwrap())),
+                    Expr::Closure(fun, decompile_code(code, fun.as_fn(code).unwrap())?),
                 );
             }
             &Opcode::InstanceClosure { dst, obj, fun } => {
@@ -504,7 +504,7 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Vec<Statement> {
                         state.push_expr(
                             i,
                             dst,
-                            Expr::Closure(fun, decompile_code(code, fun.as_fn(code).unwrap())),
+                            Expr::Closure(fun, decompile_code(code, fun.as_fn(code).unwrap())?),
                         );
                     }
                     _ => {
@@ -692,7 +692,8 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Vec<Statement> {
                 state.push_expr(
                     i,
                     dst,
-                    Expr::Field(Box::new(state.expr(value)), Str::from("constructorIndex")),
+                    Expr::Field(Box::new(state.expr(value)),
+                    Str::from("constructorIndex")),
                 );
                 //state.push_expr(i, dst, state.expr(value));
             }
@@ -705,7 +706,8 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Vec<Statement> {
                 state.push_expr(
                     i,
                     dst,
-                    Expr::Field(Box::new(state.expr(value)), Str::from(field.0.to_string())),
+                    Expr::Field(Box::new(state.expr(value)),
+                    Str::from(field.0.to_string())),
                 );
             }
             &Opcode::SetEnumField { value, field, src } => match state.expr(value) {
@@ -738,7 +740,8 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Vec<Statement> {
                 state.push_expr(
                     i,
                     dst,
-                    Expr::Field(Box::new(state.expr(array)), Str::from("length")),
+                    Expr::Field(Box::new(state.expr(array)),
+                    Str::from("length")),
                 );
             }
             &Opcode::GetArray { dst, array, index } => {
@@ -784,22 +787,22 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Vec<Statement> {
         ],
     );
 
-    statements
+    Ok(statements)
 }
 
 /// Decompile a function out of context
-pub fn decompile_function(code: &Bytecode, f: &Function) -> Method {
-    Method {
+pub fn decompile_function(code: &Bytecode, f: &Function) -> Result<Method, String> {
+    Ok(Method {
         fun: f.findex,
         static_: true,
         dynamic: false,
-        statements: decompile_code(code, f),
-    }
+        statements: decompile_code(code, f)?,
+    })
 }
 
 /// Decompile a class with its static and instance fields and methods.
-pub fn decompile_class(code: &Bytecode, obj: &TypeObj) -> Class {
-    let static_type = obj.get_static_type(code);
+pub fn decompile_class(ctx: &Bytecode, obj: &TypeObj) -> Result<Class, String> {
+    let static_type = obj.get_static_type(ctx);
 
     let mut fields = Vec::new();
     for (i, f) in obj.own_fields.iter().enumerate() {
@@ -810,7 +813,7 @@ pub fn decompile_class(code: &Bytecode, obj: &TypeObj) -> Class {
             continue;
         }
         fields.push(ClassField {
-            name: f.name(code).to_owned(),
+            name: f.name(ctx).to_owned(),
             static_: false,
             ty: f.t,
         });
@@ -824,7 +827,7 @@ pub fn decompile_class(code: &Bytecode, obj: &TypeObj) -> Class {
                 continue;
             }
             fields.push(ClassField {
-                name: f.name(code).to_owned(),
+                name: f.name(ctx).to_owned(),
                 static_: true,
                 ty: f.t,
             });
@@ -832,42 +835,39 @@ pub fn decompile_class(code: &Bytecode, obj: &TypeObj) -> Class {
     }
 
     let mut methods = Vec::new();
-    for fun in obj.bindings.values() {
+    for proto in &obj.protos {
+        let f = proto.findex.as_fn(ctx).ok_or_else(|| 
+            format!("Failed to get function for method {}", proto.name(ctx))
+        )?;
+        let decompiled = decompile_code(ctx, f)?;  // Handle the error here
         methods.push(Method {
-            fun: *fun,
+            fun: proto.findex,
             static_: false,
-            dynamic: true,
-            statements: decompile_code(code, fun.as_fn(code).unwrap()),
-        })
+            dynamic: false,
+            statements: decompiled,
+        });
     }
     if let Some(ty) = static_type {
         for fun in ty.bindings.values() {
+            let decompiled = decompile_code(ctx, fun.as_fn(ctx).unwrap())?;
             methods.push(Method {
                 fun: *fun,
                 static_: true,
                 dynamic: false,
-                statements: decompile_code(code, fun.as_fn(code).unwrap()),
-            })
+                statements: decompiled,
+            });
         }
     }
-    for f in &obj.protos {
-        methods.push(Method {
-            fun: f.findex,
-            static_: false,
-            dynamic: false,
-            statements: decompile_code(code, f.findex.as_fn(code).unwrap()),
-        })
-    }
 
-    Class {
-        name: obj.name(code).to_owned(),
+    Ok(Class {
+        name: obj.name(ctx).to_owned(),
         parent: obj
             .super_
-            .and_then(|ty| ty.as_obj(code))
-            .map(|ty| ty.name(code).to_owned()),
+            .and_then(|ty| ty.as_obj(ctx))
+            .map(|ty| ty.name(ctx).to_owned()),
         fields,
         methods,
-    }
+    })
 }
 
 #[cfg(test)]

@@ -4,8 +4,8 @@ use crate::ast::{add, ConstructorCall, Expr, Operation, Statement};
 use crate::call_fun;
 
 pub(crate) trait AstVisitor {
-    fn visit_stmt(&mut self, code: &Bytecode, stmt: &mut Statement) {}
-    fn visit_expr(&mut self, code: &Bytecode, expr: &mut Expr) {}
+    fn visit_stmt(&mut self, _code: &Bytecode, _stmt: &mut Statement) {}
+    fn visit_expr(&mut self, _code: &Bytecode, _expr: &mut Expr) {}
 }
 
 /// Visit everything depth-first
