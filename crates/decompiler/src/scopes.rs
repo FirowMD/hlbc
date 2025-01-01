@@ -232,7 +232,7 @@ impl Scopes {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn push_catch(&mut self, len: i32) {
+    pub(crate) fn push_catch(&mut self, _len: i32) {
         // ... method implementation ...
     }
 
