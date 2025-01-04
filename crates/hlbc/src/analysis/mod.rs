@@ -61,6 +61,46 @@ impl Function {
         })
     }
 
+    /// Find any outbound references to other elements in a function
+    pub fn find_elem_refs(&self, elem_idx: usize) -> impl Iterator<Item = (usize, &Opcode)> + '_ {
+        self.ops.iter().enumerate().filter_map(move |(i, o)| match o {
+            Opcode::Type { ty, .. } if ty.0 == elem_idx => Some((i, o)),
+            
+            Opcode::Field { field, .. } if field.0 == elem_idx => Some((i, o)),
+            Opcode::SetField { field, .. } if field.0 == elem_idx => Some((i, o)),
+            Opcode::GetThis { field, .. } if field.0 == elem_idx => Some((i, o)),
+            Opcode::SetThis { field, .. } if field.0 == elem_idx => Some((i, o)),
+            Opcode::CallMethod { field, .. } if field.0 == elem_idx => Some((i, o)),
+            Opcode::CallThis { field, .. } if field.0 == elem_idx => Some((i, o)),
+            Opcode::SetEnumField { field, .. } if field.0 == elem_idx => Some((i, o)),
+            Opcode::EnumField { field, .. } if field.0 == elem_idx => Some((i, o)),
+            
+            Opcode::MakeEnum { construct, .. } if construct.0 == elem_idx => Some((i, o)),
+            Opcode::EnumAlloc { construct, .. } if construct.0 == elem_idx => Some((i, o)),
+            
+            Opcode::GetGlobal { global, .. } if global.0 == elem_idx => Some((i, o)),
+            Opcode::SetGlobal { global, .. } if global.0 == elem_idx => Some((i, o)),
+            
+            Opcode::String { ptr, .. } if ptr.0 == elem_idx => Some((i, o)),
+            Opcode::Bytes { ptr, .. } if ptr.0 == elem_idx => Some((i, o)),
+            Opcode::Int { ptr, .. } if ptr.0 == elem_idx => Some((i, o)),
+            Opcode::Float { ptr, .. } if ptr.0 == elem_idx => Some((i, o)),
+
+            Opcode::Call0 { fun, .. } if fun.0 == elem_idx => Some((i, o)),
+            Opcode::Call1 { fun, .. } if fun.0 == elem_idx => Some((i, o)),
+            Opcode::Call2 { fun, .. } if fun.0 == elem_idx => Some((i, o)), 
+            Opcode::Call3 { fun, .. } if fun.0 == elem_idx => Some((i, o)),
+            Opcode::Call4 { fun, .. } if fun.0 == elem_idx => Some((i, o)),
+            Opcode::CallN { fun, .. } if fun.0 == elem_idx => Some((i, o)),
+            Opcode::StaticClosure { fun, .. } if fun.0 == elem_idx => Some((i, o)),
+            Opcode::InstanceClosure { fun, .. } if fun.0 == elem_idx => Some((i, o)),
+
+            Opcode::Prefetch { field, .. } if field.0 == elem_idx => Some((i, o)),
+            
+            _ => None,
+        })
+    }
+
     /// Starting from a position in a function, finds the last time a register has been assigned a closure
     pub fn find_last_closure_assign(
         &self,
