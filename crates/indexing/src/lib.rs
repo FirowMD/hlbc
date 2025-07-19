@@ -72,7 +72,7 @@ impl Searcher for Contains {
             }),
         )
         .into_iter()
-        .map(|(c, _s)| c)
+        .map(|(c, s)| c)
         .collect()
     }
 }
@@ -121,7 +121,7 @@ impl Searcher for ClangdSearcher {
             }),
         )
         .into_iter()
-        .map(|(c, _s)| c)
+        .map(|(c, s)| c)
         .collect()
     }
 }
@@ -148,7 +148,7 @@ impl Searcher for SkimSearcher {
             }),
         )
         .into_iter()
-        .map(|(c, _s)| c)
+        .map(|(c, s)| c)
         .collect()
     }
 }

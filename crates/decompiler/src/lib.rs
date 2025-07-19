@@ -176,7 +176,7 @@ impl<'c> DecompilerState<'c> {
 
 /// Decompile a function code to a list of [Statement]s.
 /// This works by analyzing each opcodes in order while trying to reconstruct scopes, contexts and intents.
-pub fn decompile_code(code: &Bytecode, f: &Function) -> Result<Vec<Statement>, String> {
+pub fn decompile_code(code: &Bytecode, f: &Function) -> Vec<Statement> {
     let mut state = DecompilerState::new(code, f);
 
     let iter = f.ops.iter().enumerate();
@@ -295,10 +295,10 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Result<Vec<Statement>, S
             &Opcode::Throw { exc } | &Opcode::Rethrow { exc } => {
                 state.push_stmt(Statement::Throw(state.expr(exc)));
             }
-            &Opcode::Trap { exc: _, offset } => {
+            &Opcode::Trap { exc, offset } => {
                 state.scopes.push_try(offset + 1);
             }
-            &Opcode::EndTrap { exc: _ } => {
+            &Opcode::EndTrap { exc } => {
                 // TODO try catch
             }
             //endregion
@@ -310,8 +310,8 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Result<Vec<Statement>, S
             &Opcode::Float { dst, ptr } => {
                 state.push_expr(i, dst, cst_float(ptr));
             }
-            &Opcode::Bool { dst, _value } => {
-                state.push_expr(i, dst, cst_bool(_value));
+            &Opcode::Bool { dst, value } => {
+                state.push_expr(i, dst, cst_bool(value));
             }
             &Opcode::String { dst, ptr } => {
                 state.push_expr(i, dst, cst_string(ptr));
@@ -451,12 +451,13 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Result<Vec<Statement>, S
                 }
             }
             Opcode::CallThis { dst, field, args } => {
-                let method = f.regs[0].method(field.0, code).unwrap();
-                let call = call(
-                    Expr::Field(Box::new(cst_this()), method.name(code)),
-                    state.args_expr(args),
-                );
-                if method
+                match f.regs[0].method(field.0, code) {
+                    Some(method) => {
+                        let call = call(
+                            Expr::Field(Box::new(cst_this()), method.name(code)),
+                            state.args_expr(args),
+                        );
+                        if method
                     .findex
                     .as_fn(code)
                     .map(|fun| fun.ty(code).ret.is_void())
@@ -465,6 +466,12 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Result<Vec<Statement>, S
                     state.push_stmt(stmt(call));
                 } else {
                     state.push_expr(i, *dst, call);
+                }
+                    }
+                    None => {
+                        // Method not found, create a placeholder
+                        state.push_expr(i, *dst, Expr::Unknown("Unresolved method call".to_string()));
+                    }
                 }
             }
             Opcode::CallClosure { dst, fun, args } => {
@@ -490,7 +497,10 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Result<Vec<Statement>, S
                 state.push_expr(
                     i,
                     dst,
-                    Expr::Closure(fun, decompile_code(code, fun.as_fn(code).unwrap())?),
+                    match fun.as_fn(code) {
+                        Some(function) => Expr::Closure(fun, decompile_code(code, function)),
+                        None => Expr::Unknown("Unresolved closure function".to_string()),
+                    },
                 );
             }
             &Opcode::InstanceClosure { dst, obj, fun } => {
@@ -504,7 +514,7 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Result<Vec<Statement>, S
                         state.push_expr(
                             i,
                             dst,
-                            Expr::Closure(fun, decompile_code(code, fun.as_fn(code).unwrap())?),
+                            Expr::Closure(fun, decompile_code(code, fun.as_fn(code).unwrap())),
                         );
                     }
                     _ => {
@@ -677,45 +687,39 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Result<Vec<Statement>, S
                     Expr::EnumConstr(f.regtype(dst), construct, Vec::new()),
                 );
             }
-            Opcode::MakeEnum { 
-                dst, 
-                construct, 
-                args 
+            Opcode::MakeEnum {
+                dst,
+                construct,
+                args,
             } => {
                 state.push_expr(
                     i,
                     *dst,
-                    Expr::EnumConstr(
-                        f.regtype(*dst),
-                        *construct,
-                        state.args_expr(&args)
-                    ),
+                    Expr::EnumConstr(f.regtype(*dst), *construct, state.args_expr(args)),
                 );
             }
             &Opcode::EnumIndex { dst, value } => {
                 state.push_expr(
                     i,
                     dst,
-                    Expr::Field(Box::new(state.expr(value)),
-                    Str::from("constructorIndex")),
+                    Expr::Field(Box::new(state.expr(value)), Str::from("constructorIndex")),
                 );
                 //state.push_expr(i, dst, state.expr(value));
             }
             &Opcode::EnumField {
                 dst,
                 value,
-                construct: _,
+                construct,
                 field,
             } => {
                 state.push_expr(
                     i,
                     dst,
-                    Expr::Field(Box::new(state.expr(value)),
-                    Str::from(field.0.to_string())),
+                    Expr::Field(Box::new(state.expr(value)), Str::from(field.0.to_string())),
                 );
             }
             &Opcode::SetEnumField { value, field, src } => match state.expr(value) {
-                Expr::Variable(_r, _name) => {
+                Expr::Variable(r, name) => {
                     state.push_stmt(Statement::Assign {
                         declaration: false,
                         variable: Expr::Field(
@@ -744,8 +748,7 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Result<Vec<Statement>, S
                 state.push_expr(
                     i,
                     dst,
-                    Expr::Field(Box::new(state.expr(array)),
-                    Str::from("length")),
+                    Expr::Field(Box::new(state.expr(array)), Str::from("length")),
                 );
             }
             &Opcode::GetArray { dst, array, index } => {
@@ -791,22 +794,22 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Result<Vec<Statement>, S
         ],
     );
 
-    Ok(statements)
+    statements
 }
 
 /// Decompile a function out of context
-pub fn decompile_function(code: &Bytecode, f: &Function) -> Result<Method, String> {
-    Ok(Method {
+pub fn decompile_function(code: &Bytecode, f: &Function) -> Method {
+    Method {
         fun: f.findex,
         static_: true,
         dynamic: false,
-        statements: decompile_code(code, f)?,
-    })
+        statements: decompile_code(code, f),
+    }
 }
 
 /// Decompile a class with its static and instance fields and methods.
-pub fn decompile_class(ctx: &Bytecode, obj: &TypeObj) -> Result<Class, String> {
-    let static_type = obj.get_static_type(ctx);
+pub fn decompile_class(code: &Bytecode, obj: &TypeObj) -> Class {
+    let static_type = obj.get_static_type(code);
 
     let mut fields = Vec::new();
     for (i, f) in obj.own_fields.iter().enumerate() {
@@ -817,7 +820,7 @@ pub fn decompile_class(ctx: &Bytecode, obj: &TypeObj) -> Result<Class, String> {
             continue;
         }
         fields.push(ClassField {
-            name: f.name(ctx).to_owned(),
+            name: f.name(code).to_owned(),
             static_: false,
             ty: f.t,
         });
@@ -831,7 +834,7 @@ pub fn decompile_class(ctx: &Bytecode, obj: &TypeObj) -> Result<Class, String> {
                 continue;
             }
             fields.push(ClassField {
-                name: f.name(ctx).to_owned(),
+                name: f.name(code).to_owned(),
                 static_: true,
                 ty: f.t,
             });
@@ -839,39 +842,42 @@ pub fn decompile_class(ctx: &Bytecode, obj: &TypeObj) -> Result<Class, String> {
     }
 
     let mut methods = Vec::new();
-    for proto in &obj.protos {
-        let f = proto.findex.as_fn(ctx).ok_or_else(|| 
-            format!("Failed to get function for method {}", proto.name(ctx))
-        )?;
-        let decompiled = decompile_code(ctx, f)?;  // Handle the error here
+    for fun in obj.bindings.values() {
         methods.push(Method {
-            fun: proto.findex,
+            fun: *fun,
             static_: false,
-            dynamic: false,
-            statements: decompiled,
-        });
+            dynamic: true,
+            statements: decompile_code(code, fun.as_fn(code).unwrap()),
+        })
     }
     if let Some(ty) = static_type {
         for fun in ty.bindings.values() {
-            let decompiled = decompile_code(ctx, fun.as_fn(ctx).unwrap())?;
             methods.push(Method {
                 fun: *fun,
                 static_: true,
                 dynamic: false,
-                statements: decompiled,
-            });
+                statements: decompile_code(code, fun.as_fn(code).unwrap()),
+            })
         }
     }
+    for f in &obj.protos {
+        methods.push(Method {
+            fun: f.findex,
+            static_: false,
+            dynamic: false,
+            statements: decompile_code(code, f.findex.as_fn(code).unwrap()),
+        })
+    }
 
-    Ok(Class {
-        name: obj.name(ctx).to_owned(),
+    Class {
+        name: obj.name(code).to_owned(),
         parent: obj
             .super_
-            .and_then(|ty| ty.as_obj(ctx))
-            .map(|ty| ty.name(ctx).to_owned()),
+            .and_then(|ty| ty.as_obj(code))
+            .map(|ty| ty.name(code).to_owned()),
         fields,
         methods,
-    })
+    }
 }
 
 #[cfg(test)]

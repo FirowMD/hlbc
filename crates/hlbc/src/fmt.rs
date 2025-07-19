@@ -617,7 +617,7 @@ impl Opcode {
             Opcode::Mov { dst, src } => op!("{dst} = {src}"),
             Opcode::Int { dst, ptr } => op!("{dst} = {}", ptr.display::<EnhancedFmt>(ctx)),
             Opcode::Float { dst, ptr } => op!("{dst} = {}", ptr.display::<EnhancedFmt>(ctx)),
-            Opcode::Bool { dst, _value } => op!("{dst} = {}", _value),
+            Opcode::Bool { dst, value } => op!("{dst} = {}", value),
             Opcode::String { dst, ptr } => op!("{dst} = \"{}\"", ptr.display::<EnhancedFmt>(ctx)),
             Opcode::Null { dst } => op!("{dst} = null"),
             Opcode::Add { dst, a, b } => op!("{dst} = {a} + {b}"),

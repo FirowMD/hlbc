@@ -2,6 +2,7 @@ use crate::types::{
     InlineBool, InlineInt, JumpOffset, RefBytes, RefEnumConstruct, RefField, RefFloat, RefFun,
     RefGlobal, RefInt, RefString, RefType, Reg,
 };
+use serde::{Serialize, Deserialize};
 
 /// Opcodes definitions. The fields are the opcode arguments.
 ///
@@ -10,7 +11,7 @@ use crate::types::{
 /// comment on each variant.
 ///
 /// The order of opcodes here is important as it defines the number used for serialization.
-#[derive(Debug, Clone, hlbc_derive::OpcodeHelper)]
+#[derive(Debug, Clone, hlbc_derive::OpcodeHelper, Serialize, Deserialize)]
 pub enum Opcode {
     /// Copy value from *src* into *dst*
     ///
@@ -38,7 +39,7 @@ pub enum Opcode {
     /// `dst = <true|false>`
     Bool {
         dst: Reg,
-        _value: InlineBool,
+        value: InlineBool,
     },
     /// Get a byte array from the constant pool
     ///
@@ -738,13 +739,13 @@ pub enum Opcode {
         /// https://github.com/HaxeFoundation/hashlink/blob/733b6a14a0a7e7cfba6c21cdf0ee03595cafafb4/src/jit.c#L4310
         /// https://www.felixcloutier.com/x86/prefetchh
         /// https://www.felixcloutier.com/x86/prefetchw
-        _mode: InlineInt,
+        mode: InlineInt,
     },
     /// Inline x86 assembly
     Asm {
         /// https://github.com/HaxeFoundation/hashlink/blob/733b6a14a0a7e7cfba6c21cdf0ee03595cafafb4/src/jit.c#L4334
-        _mode: InlineInt,
-        _value: InlineInt,
+        mode: InlineInt,
+        value: InlineInt,
         /// Warning ! Only non-zero values indicates valid reg. Register index is reg-1.
         reg: Reg,
     },

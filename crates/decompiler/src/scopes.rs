@@ -29,7 +29,6 @@ pub(crate) enum ScopeData {
         cond: Expr,
     },
     Try,
-    #[allow(dead_code)]
     Catch,
 }
 
@@ -72,6 +71,7 @@ impl Scope {
                 stmts: self.stmts,
             },
             ScopeData::Try => Statement::Try { stmts: self.stmts },
+            ScopeData::Catch => Statement::Catch { stmts: self.stmts },
             _ => {
                 unreachable!()
             }
@@ -98,10 +98,6 @@ impl Scopes {
 
     pub(crate) fn advance(&mut self) {
         let mut stmt = None;
-        if self.scopes.is_empty() {
-            return;
-        }
-        
         for i in (0..self.scopes.len()).rev() {
             if matches!(self.scopes[i].ty, ScopeType::Len(len) if len == 1) {
                 let mut scope = self.scopes.remove(i);
@@ -111,9 +107,11 @@ impl Scopes {
                 // Exception for Switch where a switch scope can be closed with a switch case open
                 if let ScopeData::Switch { cases, .. } = &mut scope.data {
                     if i < self.scopes.len() {
-                        let case = self.scopes.remove(i);
-                        if let ScopeData::SwitchCase { pattern } = case.data {
-                            cases.push((pattern, case.stmts));
+                        if let ScopeData::SwitchCase { .. } = self.scopes[i].data {
+                            let case = self.scopes.remove(i);
+                            if let ScopeData::SwitchCase { pattern } = case.data {
+                                cases.push((pattern, case.stmts));
+                            }
                         }
                     }
                 }
@@ -231,9 +229,9 @@ impl Scopes {
             .push(Scope::new(ScopeType::Len(len), ScopeData::Try))
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn push_catch(&mut self, _len: i32) {
-        // ... method implementation ...
+    pub(crate) fn push_catch(&mut self, len: i32) {
+        self.scopes
+            .push(Scope::new(ScopeType::Len(len), ScopeData::Catch))
     }
 
     //region QUERIES

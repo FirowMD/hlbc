@@ -3,13 +3,25 @@
 use std::iter::repeat;
 
 use crate::types::{FunPtr, Reg};
-use crate::{Bytecode, Function, Native, Opcode, RefFun, RefType, Resolve, Type, TypeObj};
+use crate::{Bytecode, Function, Native, Opcode, RefFun, RefType, Resolve, Type, TypeObj, RefFunKnown};
 
 #[cfg(feature = "graph")]
 pub mod graph;
 
 pub mod files;
 pub mod usage;
+
+pub trait BytecodeFunctionExt {
+    fn set_function(&mut self, idx: usize, fun: crate::Function);
+}
+
+impl BytecodeFunctionExt for crate::Bytecode {
+    fn set_function(&mut self, idx: usize, fun: crate::Function) {
+        if idx < self.functions.len() {
+            self.functions[idx] = fun;
+        }
+    }
+}
 
 impl Bytecode {
     /// Iterate on every instruction of every function
@@ -18,6 +30,49 @@ impl Bytecode {
             .iter()
             .flat_map(|f| repeat(f).zip(f.ops.iter().enumerate()))
     }
+
+    /// Add a new type to the bytecode.
+    /// Returns the RefType pointing to the newly added type.
+    pub fn add_type(&mut self, ty: Type) -> RefType {
+        let idx = self.types.len();
+        self.types.push(ty);
+        RefType(idx)
+    }
+
+    /// Add a new function to the bytecode.
+    /// Returns the RefFun pointing to the newly added function.
+    pub fn add_function(&mut self, mut fun: Function) -> RefFun {
+        if fun.findex.0 == 0 {
+            fun.findex = RefFun(self.findex_max());
+        }
+
+        let idx = self.functions.len();
+        self.findexes.push(RefFunKnown::Fun(idx));
+        if !fun.name.is_null() {
+            self.fnames.insert(self[fun.name].clone(), idx);
+        }
+        self.functions.push(fun);
+        RefFun(self.findexes.len() - 1)
+    }
+    
+    /// Remove specified type from the bytecode.
+    pub fn remove_type(&mut self, ty: RefType) {
+        let idx = ty.0;
+        if idx < self.types.len() {
+            self.types.remove(idx);
+            // TODO remove from all functions
+        }
+    }
+    
+    /// Remove specified function from the bytecode.
+    pub fn remove_function(&mut self, fun: RefFun) {
+        let idx = fun.0;
+        if idx < self.functions.len() {
+            self.functions.remove(idx);
+            // TODO remove from all functions
+        }
+    }
+// Extension trait for editing functions in Bytecode from outside this crate
 }
 
 impl RefFun {
@@ -57,46 +112,6 @@ impl Function {
             // Reference through closure
             Opcode::StaticClosure { fun, .. } => Some((i, o, *fun)),
             Opcode::InstanceClosure { fun, .. } => Some((i, o, *fun)),
-            _ => None,
-        })
-    }
-
-    /// Find any outbound references to other elements in a function
-    pub fn find_elem_refs(&self, elem_idx: usize) -> impl Iterator<Item = (usize, &Opcode)> + '_ {
-        self.ops.iter().enumerate().filter_map(move |(i, o)| match o {
-            Opcode::Type { ty, .. } if ty.0 == elem_idx => Some((i, o)),
-            
-            Opcode::Field { field, .. } if field.0 == elem_idx => Some((i, o)),
-            Opcode::SetField { field, .. } if field.0 == elem_idx => Some((i, o)),
-            Opcode::GetThis { field, .. } if field.0 == elem_idx => Some((i, o)),
-            Opcode::SetThis { field, .. } if field.0 == elem_idx => Some((i, o)),
-            Opcode::CallMethod { field, .. } if field.0 == elem_idx => Some((i, o)),
-            Opcode::CallThis { field, .. } if field.0 == elem_idx => Some((i, o)),
-            Opcode::SetEnumField { field, .. } if field.0 == elem_idx => Some((i, o)),
-            Opcode::EnumField { field, .. } if field.0 == elem_idx => Some((i, o)),
-            
-            Opcode::MakeEnum { construct, .. } if construct.0 == elem_idx => Some((i, o)),
-            Opcode::EnumAlloc { construct, .. } if construct.0 == elem_idx => Some((i, o)),
-            
-            Opcode::GetGlobal { global, .. } if global.0 == elem_idx => Some((i, o)),
-            Opcode::SetGlobal { global, .. } if global.0 == elem_idx => Some((i, o)),
-            
-            Opcode::String { ptr, .. } if ptr.0 == elem_idx => Some((i, o)),
-            Opcode::Bytes { ptr, .. } if ptr.0 == elem_idx => Some((i, o)),
-            Opcode::Int { ptr, .. } if ptr.0 == elem_idx => Some((i, o)),
-            Opcode::Float { ptr, .. } if ptr.0 == elem_idx => Some((i, o)),
-
-            Opcode::Call0 { fun, .. } if fun.0 == elem_idx => Some((i, o)),
-            Opcode::Call1 { fun, .. } if fun.0 == elem_idx => Some((i, o)),
-            Opcode::Call2 { fun, .. } if fun.0 == elem_idx => Some((i, o)), 
-            Opcode::Call3 { fun, .. } if fun.0 == elem_idx => Some((i, o)),
-            Opcode::Call4 { fun, .. } if fun.0 == elem_idx => Some((i, o)),
-            Opcode::CallN { fun, .. } if fun.0 == elem_idx => Some((i, o)),
-            Opcode::StaticClosure { fun, .. } if fun.0 == elem_idx => Some((i, o)),
-            Opcode::InstanceClosure { fun, .. } if fun.0 == elem_idx => Some((i, o)),
-
-            Opcode::Prefetch { field, .. } if field.0 == elem_idx => Some((i, o)),
-            
             _ => None,
         })
     }

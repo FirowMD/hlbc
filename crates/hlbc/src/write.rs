@@ -343,7 +343,10 @@ pub(crate) fn write_var(w: &mut impl Write, value: i32) -> Result<()> {
 pub(crate) fn write_strings(w: &mut impl Write, strings: &[Str]) -> Result<()> {
     let cstr: Vec<CString> = strings
         .iter()
-        .map(|s| CString::new(s.as_bytes()).unwrap())
+        .filter_map(|s| {
+            let bytes: Vec<u8> = s.as_bytes().iter().copied().filter(|&b| b != 0).collect();
+            CString::new(bytes).ok()
+        })
         .collect();
     let size = cstr
         .iter()

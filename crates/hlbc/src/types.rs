@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::ops::Index;
 
 use crate::{Bytecode, Opcode, Resolve, Str};
+use serde::{Serialize, Deserialize};
 
 /// Offset for a jump instruction. Can be negative, indicating a backward jump.
 pub type JumpOffset = i32;
@@ -12,23 +13,23 @@ pub type InlineBool = bool;
 /// A register argument
 ///
 /// Registers are a function local variables.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Default, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default, Hash, Serialize, Deserialize)]
 pub struct Reg(pub u32);
 
 /// A reference to the i32 constant pool
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub struct RefInt(pub usize);
 
 /// A reference to the f64 constant pool
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub struct RefFloat(pub usize);
 
 /// A reference to the bytes constant pool
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub struct RefBytes(pub usize);
 
 /// Reference to the string constant pool
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub struct RefString(pub usize);
 
 impl RefString {
@@ -39,11 +40,11 @@ impl RefString {
 }
 
 /// A reference to a global
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Default, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default, Hash, Serialize, Deserialize)]
 pub struct RefGlobal(pub usize);
 
 /// An object field definition
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ObjField {
     /// Field name
     pub name: RefString,
@@ -58,11 +59,11 @@ impl ObjField {
 }
 
 /// A reference to an object field
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Default)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Default, Serialize, Deserialize)]
 pub struct RefField(pub usize);
 
 /// An object method definition
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjProto {
     /// Method name
     pub name: RefString,
@@ -79,7 +80,7 @@ impl ObjProto {
 }
 
 /// An enum variant definition
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnumConstruct {
     /// Variant name
     pub name: RefString,
@@ -94,21 +95,19 @@ impl EnumConstruct {
 }
 
 /// A reference to an enum variant
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RefEnumConstruct(pub usize);
 
 /// Common type for [Type::Fun] and [Type::Method]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypeFun {
-    pub foffset: usize,
     pub args: Vec<RefType>,
     pub ret: RefType,
 }
 
 /// Common type for [Type::Obj] and [Type::Struct]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypeObj {
-    pub foffset: usize,
     pub name: RefString,
     pub super_: Option<RefType>,
     pub global: RefGlobal,
@@ -140,7 +139,7 @@ impl TypeObj {
 }
 
 /// Type available in the hashlink type system. Every type is one of those.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Type {
     Void,
     UI8,
@@ -223,10 +222,108 @@ impl Type {
             _ => None,
         }
     }
+
+    /// Replace the fields of an object or struct type.
+    pub fn set_fields(&mut self, fields: Vec<ObjField>) {
+        if let Some(obj) = self.get_type_obj_mut() {
+            obj.fields = fields;
+        }
+    }
+
+    /// Add a new field to an object or struct type.
+    pub fn add_field(&mut self, field: ObjField) {
+        if let Some(obj) = self.get_type_obj_mut() {
+            obj.fields.push(field);
+        }
+    }
+
+    /// Remove a field by index from an object or struct type.
+    pub fn remove_field(&mut self, index: usize) -> Option<ObjField> {
+        if let Some(obj) = self.get_type_obj_mut() {
+            if index < obj.fields.len() {
+                return Some(obj.fields.remove(index));
+            }
+        }
+        None
+    }
+
+    /// Replace the prototypes (methods) of an object or struct type.
+    pub fn set_protos(&mut self, protos: Vec<ObjProto>) {
+        if let Some(obj) = self.get_type_obj_mut() {
+            obj.protos = protos;
+        }
+    }
+
+    /// Add a new prototype (method) to an object or struct type.
+    pub fn add_proto(&mut self, proto: ObjProto) {
+        if let Some(obj) = self.get_type_obj_mut() {
+            obj.protos.push(proto);
+        }
+    }
+
+    /// Remove a prototype (method) by index from an object or struct type.
+    pub fn remove_proto(&mut self, index: usize) -> Option<ObjProto> {
+        if let Some(obj) = self.get_type_obj_mut() {
+            if index < obj.protos.len() {
+                return Some(obj.protos.remove(index));
+            }
+        }
+        None
+    }
+
+    /// Set the name of an object, struct, or abstract type.
+    pub fn set_name(&mut self, name: RefString) {
+        match self {
+            Type::Obj(obj) | Type::Struct(obj) => obj.name = name,
+            Type::Abstract { name: ref mut n } => *n = name,
+            _ => {}
+        }
+    }
+
+    /// Set the super type of an object or struct type.
+    pub fn set_super(&mut self, super_type: Option<RefType>) {
+        if let Some(obj) = self.get_type_obj_mut() {
+            obj.super_ = super_type;
+        }
+    }
+
+    /// Replace the enum constructs of an enum type.
+    pub fn set_enum_constructs(&mut self, constructs: Vec<EnumConstruct>) {
+        if let Type::Enum { constructs: ref mut c, .. } = self {
+            *c = constructs;
+        }
+    }
+
+    /// Add a new construct to an enum type.
+    pub fn add_enum_construct(&mut self, construct: EnumConstruct) {
+        if let Type::Enum { constructs, .. } = self {
+            constructs.push(construct);
+        }
+    }
+
+    /// Remove a construct by index from an enum type.
+    pub fn remove_enum_construct(&mut self, index: usize) -> Option<EnumConstruct> {
+        if let Type::Enum { constructs, .. } = self {
+            if index < constructs.len() {
+                return Some(constructs.remove(index));
+            }
+        }
+        None
+    }
+
+    /// Load a Type from a JSON string
+    pub fn from_json(s: &str) -> serde_json::Result<Self> {
+        serde_json::from_str(s)
+    }
+
+    /// Serialize a Type to a JSON string
+    pub fn to_json(&self) -> serde_json::Result<String> {
+        serde_json::to_string_pretty(self)
+    }
 }
 
 /// Reference to a type in the constant pool
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub struct RefType(pub usize);
 
 impl RefType {
@@ -278,30 +375,14 @@ impl RefType {
         self.as_obj(ctx).map(|obj| &obj.fields[field.0])
     }
 
-    pub fn method<'a>(&self, method_idx: usize, ctx: &'a Bytecode) -> Option<&'a ObjProto> {
-        match ctx.get(*self) {
-            Type::Obj(obj) => {
-                if method_idx >= obj.protos.len() {
-                    #[cfg(debug_assertions)]
-                    eprintln!(
-                        "Warning: Attempted to access method at index {} but object only has {} methods",
-                        method_idx,
-                        obj.protos.len()
-                    );
-                    None
-                } else {
-                    obj.protos.get(method_idx)
-                }
-            }
-            _ => None,
-        }
+    pub fn method<'a>(&self, meth: usize, ctx: &'a Bytecode) -> Option<&'a ObjProto> {
+        self.as_obj(ctx).and_then(|obj| obj.protos.get(meth))
     }
 }
 
 /// A native function reference. Contains no code but indicates the library from where to load it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Native {
-    pub foffset: usize,
     /// Native function name
     pub name: RefString,
     /// Native lib name
@@ -340,12 +421,11 @@ impl Native {
 }
 
 /// A function definition with its code.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Function {
     /// Type of the function : args and return type. Guaranteed to be a [TypeFun].
     pub t: RefType,
     pub findex: RefFun,
-    pub foffset: usize,
     /// The types of the registers used by this function
     pub regs: Vec<RefType>,
     /// Instructions
@@ -430,6 +510,85 @@ impl Function {
     pub fn ops(&self) -> impl Iterator<Item = (usize, &Opcode)> {
         self.ops.iter().enumerate()
     }
+
+    /// Replace the entire ops vector (bytecode) with a new one.
+    pub fn set_ops(&mut self, ops: Vec<Opcode>) {
+        self.ops = ops;
+    }
+
+    /// Replace a single opcode at the given index.
+    pub fn set_op(&mut self, idx: usize, op: Opcode) {
+        if let Some(slot) = self.ops.get_mut(idx) {
+            *slot = op;
+        }
+    }
+
+    /// Insert an opcode at the given index.
+    pub fn insert_op(&mut self, idx: usize, op: Opcode) {
+        self.ops.insert(idx, op);
+    }
+
+    /// Remove an opcode at the given index.
+    pub fn remove_op(&mut self, idx: usize) -> Option<Opcode> {
+        if idx < self.ops.len() {
+            Some(self.ops.remove(idx))
+        } else {
+            None
+        }
+    }
+
+    /// Replace the register types vector.
+    pub fn set_regs(&mut self, regs: Vec<RefType>) {
+        self.regs = regs;
+    }
+
+    /// Set the type of a specific register.
+    pub fn set_reg_type(&mut self, reg: Reg, ty: RefType) {
+        if let Some(slot) = self.regs.get_mut(reg.0 as usize) {
+            *slot = ty;
+        }
+    }
+
+    /// Set the function's type (signature).
+    pub fn set_type(&mut self, t: RefType) {
+        self.t = t;
+    }
+
+    /// Set the function's name.
+    pub fn set_name(&mut self, name: RefString) {
+        self.name = name;
+    }
+
+    /// Set the parent type.
+    pub fn set_parent(&mut self, parent: Option<RefType>) {
+        self.parent = parent;
+    }
+
+    /// Set the debug info.
+    pub fn set_debug_info(&mut self, debug_info: Option<Vec<(usize, usize)>>) {
+        self.debug_info = debug_info;
+    }
+
+    /// Set the assigns info.
+    pub fn set_assigns(&mut self, assigns: Option<Vec<(RefString, usize)>>) {
+        self.assigns = assigns;
+    }
+
+    /// Removes all debug-related information from the function.
+    pub fn strip_debug_info(&mut self) {
+        self.debug_info = None;
+        self.assigns = None;
+    }
+
+    /// Load a Function from a JSON string
+    pub fn from_json(s: &str) -> serde_json::Result<Self> {
+        serde_json::from_str(s)
+    }
+
+    /// Serialize a Function to a JSON string
+    pub fn to_json(&self) -> serde_json::Result<String> {
+        serde_json::to_string_pretty(self)
+    }
 }
 
 impl Index<Reg> for Function {
@@ -442,7 +601,7 @@ impl Index<Reg> for Function {
 }
 
 /// Index reference to a function or a native in the pool (findex)
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Default)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Default, Serialize, Deserialize)]
 pub struct RefFun(pub usize);
 
 impl RefFun {
@@ -452,9 +611,11 @@ impl RefFun {
     }
 
     pub fn name(&self, code: &Bytecode) -> Str {
-        match code.get(*self) {
-            FunPtr::Fun(fun) => fun.name(code),
-            FunPtr::Native(n) => n.name(code),
+        // Use safe_get_ref_fun. If None, return fallback.
+        match code.safe_get_ref_fun(*self) {
+            Some(FunPtr::Fun(fun)) => fun.name(code),
+            Some(FunPtr::Native(n)) => n.name(code),
+            None => Str::from_static("[invalid function ref]"),
         }
     }
 
@@ -512,8 +673,7 @@ impl<'a> FunPtr<'a> {
     }
 }
 
-/// A constant definition
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstantDef {
     pub global: RefGlobal,
     pub fields: Vec<usize>,

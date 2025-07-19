@@ -55,9 +55,7 @@ pub enum Error {
 
 /// Bytecode structure containing all the information.
 /// Every field is public for flexibility, but you aren't encouraged to modify them.
-///
-/// This type is like an arena, you usually work with custom
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Bytecode {
     /// Bytecode format version
     pub version: u8,
@@ -98,6 +96,14 @@ pub struct Bytecode {
 }
 
 impl Bytecode {
+    /// Safe version of get for RefFun, to be used everywhere deref is non-critical.
+    pub fn safe_get_ref_fun(&self, index: RefFun) -> Option<FunPtr> {
+        let findex = self.findexes.get(index.0)?;
+        match *findex {
+            RefFunKnown::Fun(fun) => self.functions.get(fun).map(FunPtr::Fun),
+            RefFunKnown::Native(n) => self.natives.get(n).map(FunPtr::Native),
+        }
+    }
     /// Get the entrypoint function.
     pub fn entrypoint(&self) -> &Function {
         self.get(self.entrypoint).as_fn().unwrap()
@@ -124,6 +130,15 @@ impl Bytecode {
 
     pub fn debug_file(&self, index: usize) -> Option<Str> {
         self.debug_files.as_ref().map(|files| files[index].clone())
+    }
+
+    /// Removes all debug information from the bytecode, including debug files and debug info in functions.
+    pub fn strip(&mut self) {
+        self.debug_files = None;
+
+        for function in &mut self.functions {
+            function.strip_debug_info();
+        }
     }
 }
 
@@ -215,9 +230,10 @@ impl Resolve<RefFun> for Bytecode {
     type Output<'a> = FunPtr<'a>;
 
     fn get(&self, index: RefFun) -> Self::Output<'_> {
-        match self.findexes[index.0] {
-            RefFunKnown::Fun(fun) => FunPtr::Fun(&self.functions[fun]),
-            RefFunKnown::Native(n) => FunPtr::Native(&self.natives[n]),
+        // SAFETY: use new helper for fallibility and upstream defense for display code.
+        match Bytecode::safe_get_ref_fun(self, index) {
+            Some(fp) => fp,
+            None => return FunPtr::Fun(&self.functions[0]), // fallback, see types.rs for display handling!
         }
     }
 }
