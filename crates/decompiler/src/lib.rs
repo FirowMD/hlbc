@@ -813,10 +813,13 @@ pub fn decompile_class(code: &Bytecode, obj: &TypeObj) -> Class {
 
     let mut fields = Vec::new();
     for (i, f) in obj.own_fields.iter().enumerate() {
-        if obj
-            .bindings
-            .contains_key(&RefField(i + obj.fields.len() - obj.own_fields.len()))
-        {
+        let field_index = if obj.fields.len() >= obj.own_fields.len() {
+            i + obj.fields.len() - obj.own_fields.len()
+        } else {
+            i
+        };
+        
+        if obj.bindings.contains_key(&RefField(field_index)) {
             continue;
         }
         fields.push(ClassField {
@@ -827,10 +830,13 @@ pub fn decompile_class(code: &Bytecode, obj: &TypeObj) -> Class {
     }
     if let Some(ty) = static_type {
         for (i, f) in ty.own_fields.iter().enumerate() {
-            if ty
-                .bindings
-                .contains_key(&RefField(i + ty.fields.len() - ty.own_fields.len()))
-            {
+            let field_index = if ty.fields.len() >= ty.own_fields.len() {
+                i + ty.fields.len() - ty.own_fields.len()
+            } else {
+                i
+            };
+            
+            if ty.bindings.contains_key(&RefField(field_index)) {
                 continue;
             }
             fields.push(ClassField {
