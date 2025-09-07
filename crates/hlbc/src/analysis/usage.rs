@@ -8,7 +8,7 @@ use std::ops::Index;
 use crate::opcodes::Opcode;
 use crate::types::{
     EnumConstruct, FunPtr, Function, ObjField, ObjProto, RefEnumConstruct, RefField, RefFun,
-    RefString, RefType, Reg, Type, TypeFun, TypeObj,
+    RefGlobal, RefString, RefType, Reg, Type, TypeFun, TypeObj,
 };
 use crate::Bytecode;
 
@@ -250,34 +250,31 @@ pub fn find_functions_using_type(code: &Bytecode, target_type: RefType) -> Vec<R
     let mut results = Vec::new();
     
     for func in code.functions() {
-        let mut found = false;
+        let mut uses_type = false;
         
         match func {
             FunPtr::Fun(f) => {
                 if f.t == target_type {
-                    results.push(f.findex);
-                    found = true;
+                    uses_type = true;
                 }
                 
-                if !found {
+                if !uses_type {
                     if let Some(fun_type) = f.t.as_fun(code) {
                         if fun_type.args.contains(&target_type) || fun_type.ret == target_type {
-                            results.push(f.findex);
-                            found = true;
+                            uses_type = true;
                         }
                     }
                 }
                 
-                if !found && f.regs.contains(&target_type) {
-                    results.push(f.findex);
-                    found = true;
+                if !uses_type && f.regs.contains(&target_type) {
+                    uses_type = true;
                 }
                 
-                if !found {
+                if !uses_type {
                     for op in &f.ops {
                         match op {
                             Opcode::Type { ty, .. } if *ty == target_type => {
-                                results.push(f.findex);
+                                uses_type = true;
                                 break;
                             }
                             Opcode::Call0 { fun, .. }
@@ -294,14 +291,52 @@ pub fn find_functions_using_type(code: &Bytecode, target_type: RefType) -> Vec<R
                                         FunPtr::Native(n) => n.t,
                                     };
                                     if fn_type == target_type {
-                                        results.push(f.findex);
+                                        uses_type = true;
                                         break;
                                     }
+                                    if let Some(fun_type) = fn_type.as_fun(code) {
+                                        if fun_type.args.contains(&target_type) || fun_type.ret == target_type {
+                                            uses_type = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            Opcode::New { dst } => {
+                                if f.regs.get(dst.0).copied() == Some(target_type) {
+                                    uses_type = true;
+                                    break;
+                                }
+                            }
+                            Opcode::EnumAlloc { dst, .. } | Opcode::MakeEnum { dst, .. } => {
+                                if let Some(reg_type) = f.regs.get(dst.0) {
+                                    if *reg_type == target_type {
+                                        uses_type = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            Opcode::SafeCast { dst, .. } | Opcode::UnsafeCast { dst, .. } => {
+                                if let Some(reg_type) = f.regs.get(dst.0) {
+                                    if *reg_type == target_type {
+                                        uses_type = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            Opcode::GetGlobal { global, .. } | Opcode::SetGlobal { global, .. } => {
+                                if global.0 < code.globals.len() && code.globals[global.0] == target_type {
+                                    uses_type = true;
+                                    break;
                                 }
                             }
                             _ => {}
                         }
                     }
+                }
+                
+                if uses_type {
+                    results.push(f.findex);
                 }
             }
             FunPtr::Native(n) => {
@@ -338,8 +373,71 @@ pub fn find_types_used_by_function(code: &Bytecode, fun_index: RefFun) -> Vec<Re
                 types.extend(&f.regs);
                 
                 for op in &f.ops {
-                    if let Opcode::Type { ty, .. } = op {
-                        types.push(*ty);
+                    match op {
+                        Opcode::Type { ty, .. } => {
+                            types.push(*ty);
+                        }
+                        Opcode::Call0 { fun, .. }
+                        | Opcode::Call1 { fun, .. }
+                        | Opcode::Call2 { fun, .. }
+                        | Opcode::Call3 { fun, .. }
+                        | Opcode::Call4 { fun, .. }
+                        | Opcode::CallN { fun, .. }
+                        | Opcode::StaticClosure { fun, .. }
+                        | Opcode::InstanceClosure { fun, .. } => {
+                            if let Some(called_fn) = code.safe_get_ref_fun(*fun) {
+                                let fn_type = match called_fn {
+                                    FunPtr::Fun(f) => f.t,
+                                    FunPtr::Native(n) => n.t,
+                                };
+                                types.push(fn_type);
+                                if let Some(fun_type) = fn_type.as_fun(code) {
+                                    types.extend(&fun_type.args);
+                                    types.push(fun_type.ret);
+                                }
+                            }
+                        }
+                        Opcode::CallMethod { args, .. } => {
+                            if let Some(reg_type) = f.regs.get(args[0].0) {
+                                types.push(*reg_type);
+                            }
+                        }
+                        Opcode::CallThis { .. } => {
+                            if let Some(reg_type) = f.regs.get(0) {
+                                types.push(*reg_type);
+                            }
+                        }
+                        Opcode::Field { obj, .. } | Opcode::SetField { obj, .. } => {
+                            if let Some(reg_type) = f.regs.get(obj.0) {
+                                types.push(*reg_type);
+                            }
+                        }
+                        Opcode::EnumAlloc { dst, .. } | Opcode::MakeEnum { dst, .. } => {
+                            if let Some(reg_type) = f.regs.get(dst.0) {
+                                types.push(*reg_type);
+                            }
+                        }
+                        Opcode::EnumField { value, .. } | Opcode::SetEnumField { value, .. } => {
+                            if let Some(reg_type) = f.regs.get(value.0) {
+                                types.push(*reg_type);
+                            }
+                        }
+                        Opcode::GetGlobal { global, .. } | Opcode::SetGlobal { global, .. } => {
+                            if global.0 < code.globals.len() {
+                                types.push(code.globals[global.0]);
+                            }
+                        }
+                        Opcode::SafeCast { dst, .. } | Opcode::UnsafeCast { dst, .. } => {
+                            if let Some(reg_type) = f.regs.get(dst.0) {
+                                types.push(*reg_type);
+                            }
+                        }
+                        Opcode::New { dst } => {
+                            if let Some(reg_type) = f.regs.get(dst.0) {
+                                types.push(*reg_type);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
