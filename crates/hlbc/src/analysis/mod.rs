@@ -11,6 +11,8 @@ pub mod graph;
 pub mod files;
 pub mod usage;
 
+pub use usage::{find_functions_using_type, find_types_used_by_function};
+
 pub trait BytecodeFunctionExt {
     fn set_function(&mut self, idx: usize, fun: crate::Function);
 }

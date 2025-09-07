@@ -245,6 +245,120 @@ pub fn usage_report(code: &Bytecode) -> FullUsageReport {
     report
 }
 
+/// Find all functions that reference a specific type
+pub fn find_functions_using_type(code: &Bytecode, target_type: RefType) -> Vec<RefFun> {
+    let mut results = Vec::new();
+    
+    for func in code.functions() {
+        let mut found = false;
+        
+        match func {
+            FunPtr::Fun(f) => {
+                if f.t == target_type {
+                    results.push(f.findex);
+                    found = true;
+                }
+                
+                if !found {
+                    if let Some(fun_type) = f.t.as_fun(code) {
+                        if fun_type.args.contains(&target_type) || fun_type.ret == target_type {
+                            results.push(f.findex);
+                            found = true;
+                        }
+                    }
+                }
+                
+                if !found && f.regs.contains(&target_type) {
+                    results.push(f.findex);
+                    found = true;
+                }
+                
+                if !found {
+                    for op in &f.ops {
+                        match op {
+                            Opcode::Type { ty, .. } if *ty == target_type => {
+                                results.push(f.findex);
+                                break;
+                            }
+                            Opcode::Call0 { fun, .. }
+                            | Opcode::Call1 { fun, .. }
+                            | Opcode::Call2 { fun, .. }
+                            | Opcode::Call3 { fun, .. }
+                            | Opcode::Call4 { fun, .. }
+                            | Opcode::CallN { fun, .. }
+                            | Opcode::StaticClosure { fun, .. }
+                            | Opcode::InstanceClosure { fun, .. } => {
+                                if let Some(called_fn) = code.safe_get_ref_fun(*fun) {
+                                    let fn_type = match called_fn {
+                                        FunPtr::Fun(f) => f.t,
+                                        FunPtr::Native(n) => n.t,
+                                    };
+                                    if fn_type == target_type {
+                                        results.push(f.findex);
+                                        break;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            FunPtr::Native(n) => {
+                if n.t == target_type {
+                    results.push(n.findex);
+                } else if let Some(fun_type) = n.t.as_fun(code) {
+                    if fun_type.args.contains(&target_type) || fun_type.ret == target_type {
+                        results.push(n.findex);
+                    }
+                }
+            }
+        }
+    }
+    
+    results.sort_unstable_by_key(|f| f.0);
+    results.dedup();
+    results
+}
+
+/// Find all types that are referenced by a specific function
+pub fn find_types_used_by_function(code: &Bytecode, fun_index: RefFun) -> Vec<RefType> {
+    let mut types = Vec::new();
+    
+    if let Some(func_ptr) = code.safe_get_ref_fun(fun_index) {
+        match func_ptr {
+            FunPtr::Fun(f) => {
+                types.push(f.t);
+                
+                if let Some(fun_type) = f.t.as_fun(code) {
+                    types.extend(&fun_type.args);
+                    types.push(fun_type.ret);
+                }
+                
+                types.extend(&f.regs);
+                
+                for op in &f.ops {
+                    if let Opcode::Type { ty, .. } = op {
+                        types.push(*ty);
+                    }
+                }
+            }
+            FunPtr::Native(n) => {
+                types.push(n.t);
+                
+                if let Some(fun_type) = n.t.as_fun(code) {
+                    types.extend(&fun_type.args);
+                    types.push(fun_type.ret);
+                }
+            }
+        }
+    }
+    
+    types.sort_unstable_by_key(|t| t.0);
+    types.dedup();
+    types
+}
+
 #[cfg(test)]
 mod tests {
     use crate::analysis::usage::FullUsageReport;
