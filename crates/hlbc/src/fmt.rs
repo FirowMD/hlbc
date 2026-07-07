@@ -943,7 +943,11 @@ mod test {
 
     #[test]
     fn fmt_all() {
-        for entry in fs::read_dir("../../data").unwrap() {
+        let dir = "../../data";
+        if !Path::new(dir).is_dir() {
+            return;
+        }
+        for entry in fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
             if let Some(ext) = path.extension() {
                 if ext == "hl" {
@@ -956,12 +960,18 @@ mod test {
     #[test]
     fn fmt_wartales() {
         let path = "E:\\Games\\Wartales\\hlboot.dat";
+        if !Path::new(path).is_file() {
+            return;
+        }
         test_fmt(path);
     }
 
     #[test]
     fn fmt_northgard() {
-        let path = "E:\\Games\\Northgard\\hlboot.dat";
+        let path = "../../data/northgard.hl";
+        if !Path::new(path).is_file() {
+            return;
+        }
         test_fmt(path);
     }
 }

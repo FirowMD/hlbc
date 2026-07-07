@@ -106,9 +106,13 @@ impl Scopes {
                 }
                 // Exception for Switch where a switch scope can be closed with a switch case open
                 if let ScopeData::Switch { cases, .. } = &mut scope.data {
-                    let case = self.scopes.remove(i);
-                    if let ScopeData::SwitchCase { pattern } = case.data {
-                        cases.push((pattern, case.stmts));
+                    if i < self.scopes.len() {
+                        if let ScopeData::SwitchCase { .. } = self.scopes[i].data {
+                            let case = self.scopes.remove(i);
+                            if let ScopeData::SwitchCase { pattern } = case.data {
+                                cases.push((pattern, case.stmts));
+                            }
+                        }
                     }
                 }
                 stmt = Some(scope.make_stmt());

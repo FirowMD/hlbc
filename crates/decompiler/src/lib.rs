@@ -451,12 +451,13 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Vec<Statement> {
                 }
             }
             Opcode::CallThis { dst, field, args } => {
-                let method = f.regs[0].method(field.0, code).unwrap();
-                let call = call(
-                    Expr::Field(Box::new(cst_this()), method.name(code)),
-                    state.args_expr(args),
-                );
-                if method
+                match f.regs[0].method(field.0, code) {
+                    Some(method) => {
+                        let call = call(
+                            Expr::Field(Box::new(cst_this()), method.name(code)),
+                            state.args_expr(args),
+                        );
+                        if method
                     .findex
                     .as_fn(code)
                     .map(|fun| fun.ty(code).ret.is_void())
@@ -465,6 +466,12 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Vec<Statement> {
                     state.push_stmt(stmt(call));
                 } else {
                     state.push_expr(i, *dst, call);
+                }
+                    }
+                    None => {
+                        // Method not found, create a placeholder
+                        state.push_expr(i, *dst, Expr::Unknown("Unresolved method call".to_string()));
+                    }
                 }
             }
             Opcode::CallClosure { dst, fun, args } => {
@@ -490,7 +497,10 @@ pub fn decompile_code(code: &Bytecode, f: &Function) -> Vec<Statement> {
                 state.push_expr(
                     i,
                     dst,
-                    Expr::Closure(fun, decompile_code(code, fun.as_fn(code).unwrap())),
+                    match fun.as_fn(code) {
+                        Some(function) => Expr::Closure(fun, decompile_code(code, function)),
+                        None => Expr::Unknown("Unresolved closure function".to_string()),
+                    },
                 );
             }
             &Opcode::InstanceClosure { dst, obj, fun } => {
@@ -803,10 +813,13 @@ pub fn decompile_class(code: &Bytecode, obj: &TypeObj) -> Class {
 
     let mut fields = Vec::new();
     for (i, f) in obj.own_fields.iter().enumerate() {
-        if obj
-            .bindings
-            .contains_key(&RefField(i + obj.fields.len() - obj.own_fields.len()))
-        {
+        let field_index = if obj.fields.len() >= obj.own_fields.len() {
+            i + obj.fields.len() - obj.own_fields.len()
+        } else {
+            i
+        };
+        
+        if obj.bindings.contains_key(&RefField(field_index)) {
             continue;
         }
         fields.push(ClassField {
@@ -817,10 +830,13 @@ pub fn decompile_class(code: &Bytecode, obj: &TypeObj) -> Class {
     }
     if let Some(ty) = static_type {
         for (i, f) in ty.own_fields.iter().enumerate() {
-            if ty
-                .bindings
-                .contains_key(&RefField(i + ty.fields.len() - ty.own_fields.len()))
-            {
+            let field_index = if ty.fields.len() >= ty.own_fields.len() {
+                i + ty.fields.len() - ty.own_fields.len()
+            } else {
+                i
+            };
+            
+            if ty.bindings.contains_key(&RefField(field_index)) {
                 continue;
             }
             fields.push(ClassField {
@@ -927,7 +943,11 @@ mod tests {
 
     #[test]
     fn decomp_northgard() {
-        let code = Bytecode::from_file("E:\\Games\\Northgard\\hlboot.dat").unwrap();
+        let path = "E:\\Games\\Northgard\\hlboot.dat";
+        if !std::path::Path::new(path).is_file() {
+            return;
+        }
+        let code = Bytecode::from_file(path).unwrap();
         for f in &code.functions {
             black_box(decompile_code(&code, f));
         }
@@ -941,7 +961,11 @@ mod tests {
 
     #[test]
     fn decomp_wartales() {
-        let code = Bytecode::from_file("E:\\Games\\Wartales\\hlboot.dat").unwrap();
+        let path = "E:\\Games\\Wartales\\hlboot.dat";
+        if !std::path::Path::new(path).is_file() {
+            return;
+        }
+        let code = Bytecode::from_file(path).unwrap();
         for f in &code.functions {
             black_box(decompile_code(&code, f));
         }

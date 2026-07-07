@@ -3,13 +3,27 @@
 use std::iter::repeat;
 
 use crate::types::{FunPtr, Reg};
-use crate::{Bytecode, Function, Native, Opcode, RefFun, RefType, Resolve, Type, TypeObj};
+use crate::{Bytecode, Function, Native, Opcode, RefFun, RefType, Resolve, Type, TypeObj, RefFunKnown};
 
 #[cfg(feature = "graph")]
 pub mod graph;
 
 pub mod files;
 pub mod usage;
+
+pub use usage::{find_functions_using_type, find_types_used_by_function};
+
+pub trait BytecodeFunctionExt {
+    fn set_function(&mut self, idx: usize, fun: crate::Function);
+}
+
+impl BytecodeFunctionExt for crate::Bytecode {
+    fn set_function(&mut self, idx: usize, fun: crate::Function) {
+        if idx < self.functions.len() {
+            self.functions[idx] = fun;
+        }
+    }
+}
 
 impl Bytecode {
     /// Iterate on every instruction of every function
@@ -18,6 +32,49 @@ impl Bytecode {
             .iter()
             .flat_map(|f| repeat(f).zip(f.ops.iter().enumerate()))
     }
+
+    /// Add a new type to the bytecode.
+    /// Returns the RefType pointing to the newly added type.
+    pub fn add_type(&mut self, ty: Type) -> RefType {
+        let idx = self.types.len();
+        self.types.push(ty);
+        RefType(idx)
+    }
+
+    /// Add a new function to the bytecode.
+    /// Returns the RefFun pointing to the newly added function.
+    pub fn add_function(&mut self, mut fun: Function) -> RefFun {
+        if fun.findex.0 == 0 {
+            fun.findex = RefFun(self.findex_max());
+        }
+
+        let idx = self.functions.len();
+        self.findexes.push(RefFunKnown::Fun(idx));
+        if !fun.name.is_null() {
+            self.fnames.insert(self[fun.name].clone(), idx);
+        }
+        self.functions.push(fun);
+        RefFun(self.findexes.len() - 1)
+    }
+    
+    /// Remove specified type from the bytecode.
+    pub fn remove_type(&mut self, ty: RefType) {
+        let idx = ty.0;
+        if idx < self.types.len() {
+            self.types.remove(idx);
+            // TODO remove from all functions
+        }
+    }
+    
+    /// Remove specified function from the bytecode.
+    pub fn remove_function(&mut self, fun: RefFun) {
+        let idx = fun.0;
+        if idx < self.functions.len() {
+            self.functions.remove(idx);
+            // TODO remove from all functions
+        }
+    }
+// Extension trait for editing functions in Bytecode from outside this crate
 }
 
 impl RefFun {

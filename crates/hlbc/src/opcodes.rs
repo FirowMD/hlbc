@@ -2,6 +2,8 @@ use crate::types::{
     InlineBool, InlineInt, JumpOffset, RefBytes, RefEnumConstruct, RefField, RefFloat, RefFun,
     RefGlobal, RefInt, RefString, RefType, Reg,
 };
+use crate::{AdjustReferences, IndexMapping};
+use serde::{Serialize, Deserialize};
 
 /// Opcodes definitions. The fields are the opcode arguments.
 ///
@@ -10,7 +12,7 @@ use crate::types::{
 /// comment on each variant.
 ///
 /// The order of opcodes here is important as it defines the number used for serialization.
-#[derive(Debug, Clone, hlbc_derive::OpcodeHelper)]
+#[derive(Debug, Clone, hlbc_derive::OpcodeHelper, Serialize, Deserialize)]
 pub enum Opcode {
     /// Copy value from *src* into *dst*
     ///
@@ -769,5 +771,83 @@ mod test {
             "Nullify a register\n`dst = null`",
             Opcode::Null { dst: Reg(0) }.description()
         );
+    }
+}
+
+impl AdjustReferences for Opcode {
+    fn adjust_references(&mut self, mapping: &IndexMapping) {
+        match self {
+            // Constant pool references
+            Opcode::Int { ptr, .. } => ptr.adjust(mapping.int_offset),
+            Opcode::Float { ptr, .. } => ptr.adjust(mapping.float_offset),
+            Opcode::String { ptr, .. } => mapping.apply_string(ptr),
+            Opcode::Bytes { ptr, .. } => ptr.adjust(mapping.bytes_offset),
+            
+            // Function calls
+            Opcode::Call0 { fun, .. } | 
+            Opcode::Call1 { fun, .. } |
+            Opcode::Call2 { fun, .. } | 
+            Opcode::Call3 { fun, .. } |
+            Opcode::Call4 { fun, .. } | 
+            Opcode::CallN { fun, .. } => {
+                fun.adjust(mapping.function_offset);
+            },
+            
+            // Closures
+            Opcode::StaticClosure { fun, .. } |
+            Opcode::InstanceClosure { fun, .. } => {
+                fun.adjust(mapping.function_offset);
+            },
+            
+            // Global access
+            Opcode::GetGlobal { global, .. } | 
+            Opcode::SetGlobal { global, .. } => {
+                global.adjust(mapping.global_offset);
+            },
+            
+            // Type operations
+            Opcode::Type { ty, .. } => ty.adjust(mapping.type_offset),
+            
+            // Field operations - need field mapping
+            Opcode::Field { field, .. } | 
+            Opcode::SetField { field, .. } |
+            Opcode::GetThis { field, .. } | 
+            Opcode::SetThis { field, .. } |
+            Opcode::CallMethod { field, .. } | 
+            Opcode::CallThis { field, .. } => {
+                if let Some(&mapped_field) = mapping.field_mappings.get(field) {
+                    *field = mapped_field;
+                }
+            },
+            
+            // Dynamic field access
+            Opcode::DynGet { field, .. } | 
+            Opcode::DynSet { field, .. } => {
+                mapping.apply_string(field);
+            },
+            
+            // Enum operations
+            Opcode::MakeEnum { construct, .. } | 
+            Opcode::EnumAlloc { construct, .. } |
+            Opcode::EnumField { construct, .. } => {
+                construct.adjust(mapping.type_offset); // EnumConstruct indexes are part of type system
+            },
+            
+            Opcode::SetEnumField { field, .. } => {
+                if let Some(&mapped_field) = mapping.field_mappings.get(field) {
+                    *field = mapped_field;
+                }
+            },
+            
+            // Prefetch with field reference
+            Opcode::Prefetch { field, .. } => {
+                if let Some(&mapped_field) = mapping.field_mappings.get(field) {
+                    *field = mapped_field;
+                }
+            },
+            
+            // All other opcodes don't have references to adjust
+            _ => {}
+        }
     }
 }

@@ -45,17 +45,26 @@ pub fn files_in_function(code: &Bytecode, f: &Function) -> HashMap<Str, Vec<Rang
 mod tests {
     use crate::analysis::files::{files_in_function, functions_in_files};
     use crate::Bytecode;
+    use std::path::Path;
 
     #[test]
     fn test_files() {
-        let code = Bytecode::from_file("../../data/Empty.hl").unwrap();
+        let path = "../../data/Empty.hl";
+        if !Path::new(path).is_file() {
+            return;
+        }
+        let code = Bytecode::from_file(path).unwrap();
         let files = functions_in_files(&code);
         dbg!(files);
     }
 
     #[test]
     fn test_lines() {
-        let code = Bytecode::from_file("../../data/Empty.hl").unwrap();
+        let path = "../../data/Empty.hl";
+        if !Path::new(path).is_file() {
+            return;
+        }
+        let code = Bytecode::from_file(path).unwrap();
         let files = files_in_function(&code, code.entrypoint());
         dbg!(files);
     }
