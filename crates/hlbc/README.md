@@ -53,7 +53,6 @@ Other alternatives include :
 
 ## Macros
 
-There are 98 different bytecode instructions, there is no way I manually write code for them. Most of the serialization
-code for these opcodes is generated through a proc macro (see [hlbc-derive](../derive)). Making that a declarative macro
-would probably turn out really hard. The only time I needed to write 98 different branches was for the formatting used
-when displaying the instructions ([src/fmt.rs](src/fmt.rs)).
+There are 99 different bytecode instructions, including `Catch`. Parser, writer, name, description, and operand metadata
+are generated from the `Opcode` enum declaration, so wire ordering and diagnostics share one source of truth. The only
+time exhaustive handwritten matching is needed is for semantic formatting and decompilation.

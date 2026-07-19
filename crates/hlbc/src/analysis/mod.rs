@@ -3,7 +3,9 @@
 use std::iter::repeat;
 
 use crate::types::{FunPtr, Reg};
-use crate::{Bytecode, Function, Native, Opcode, RefFun, RefType, Resolve, Type, TypeObj, RefFunKnown};
+use crate::{
+    Bytecode, Function, Native, Opcode, RefFun, RefFunKnown, RefType, Resolve, Type, TypeObj,
+};
 
 #[cfg(feature = "graph")]
 pub mod graph;
@@ -56,7 +58,7 @@ impl Bytecode {
         self.functions.push(fun);
         RefFun(self.findexes.len() - 1)
     }
-    
+
     /// Remove specified type from the bytecode.
     pub fn remove_type(&mut self, ty: RefType) {
         let idx = ty.0;
@@ -65,7 +67,7 @@ impl Bytecode {
             // TODO remove from all functions
         }
     }
-    
+
     /// Remove specified function from the bytecode.
     pub fn remove_function(&mut self, fun: RefFun) {
         let idx = fun.0;
@@ -74,7 +76,7 @@ impl Bytecode {
             // TODO remove from all functions
         }
     }
-// Extension trait for editing functions in Bytecode from outside this crate
+    // Extension trait for editing functions in Bytecode from outside this crate
 }
 
 impl RefFun {

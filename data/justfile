@@ -1,4 +1,4 @@
 set windows-shell := ["cmd", "/c"]
 
 build file:
-    haxe -hl {{file}}.hl -main {{file}}.hx
+    haxe -cp . -main {{file}} -hl {{file}}.hl

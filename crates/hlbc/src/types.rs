@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::ops::Index;
 
-use crate::{Bytecode, Opcode, Resolve, Str, AdjustReferences, IndexMapping};
-use serde::{Serialize, Deserialize};
+use crate::{AdjustReferences, Bytecode, IndexMapping, Opcode, Resolve, Str};
+use serde::{Deserialize, Serialize};
 
 /// Offset for a jump instruction. Can be negative, indicating a backward jump.
 pub type JumpOffset = i32;
@@ -58,7 +58,7 @@ impl RefString {
     pub fn is_null(&self) -> bool {
         self.0 == 0
     }
-    
+
     /// Adjust the string reference by an offset
     pub fn adjust(&mut self, offset: usize) {
         if !self.is_null() {
@@ -101,7 +101,9 @@ impl AdjustReferences for ObjField {
 }
 
 /// A reference to an object field
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Default, Serialize, Deserialize,
+)]
 pub struct RefField(pub usize);
 
 impl RefField {
@@ -226,7 +228,7 @@ impl AdjustReferences for TypeObj {
             super_type.adjust(mapping.type_offset);
         }
         self.global.adjust(mapping.global_offset);
-        
+
         for field in &mut self.own_fields {
             field.adjust_references(mapping);
         }
@@ -236,7 +238,7 @@ impl AdjustReferences for TypeObj {
         for proto in &mut self.protos {
             proto.adjust_references(mapping);
         }
-        
+
         // Adjust field->function bindings
         let mut new_bindings = HashMap::new();
         for (field, fun) in &self.bindings {
@@ -403,7 +405,11 @@ impl Type {
 
     /// Replace the enum constructs of an enum type.
     pub fn set_enum_constructs(&mut self, constructs: Vec<EnumConstruct>) {
-        if let Type::Enum { constructs: ref mut c, .. } = self {
+        if let Type::Enum {
+            constructs: ref mut c,
+            ..
+        } = self
+        {
             *c = constructs;
         }
     }
@@ -443,20 +449,24 @@ impl AdjustReferences for Type {
             Type::Obj(obj) | Type::Struct(obj) => obj.adjust_references(mapping),
             Type::Ref(inner) | Type::Null(inner) | Type::Packed(inner) => {
                 inner.adjust(mapping.type_offset);
-            },
+            }
             Type::Virtual { fields } => {
                 for field in fields {
                     field.adjust_references(mapping);
                 }
-            },
+            }
             Type::Abstract { name } => mapping.apply_string(name),
-            Type::Enum { name, global, constructs } => {
+            Type::Enum {
+                name,
+                global,
+                constructs,
+            } => {
                 mapping.apply_string(name);
                 global.adjust(mapping.global_offset);
                 for construct in constructs {
                     construct.adjust_references(mapping);
                 }
-            },
+            }
             _ => {} // Primitive types don't have references
         }
     }
@@ -507,7 +517,7 @@ impl RefType {
     }
 
     pub fn as_fun<'a>(&self, ctx: &'a Bytecode) -> Option<&'a TypeFun> {
-        match ctx.get(*self) {
+        match ctx.types.get(self.0)? {
             Type::Fun(fun) => Some(fun),
             Type::Method(fun) => Some(fun),
             _ => None,
@@ -515,15 +525,27 @@ impl RefType {
     }
 
     pub fn as_obj<'a>(&self, ctx: &'a Bytecode) -> Option<&'a TypeObj> {
-        ctx.get(*self).get_type_obj()
+        ctx.types.get(self.0)?.get_type_obj()
     }
 
     pub fn field<'a>(&self, field: RefField, ctx: &'a Bytecode) -> Option<&'a ObjField> {
-        self.as_obj(ctx).map(|obj| &obj.fields[field.0])
+        self.as_obj(ctx)?.fields.get(field.0)
     }
 
     pub fn method<'a>(&self, meth: usize, ctx: &'a Bytecode) -> Option<&'a ObjProto> {
-        self.as_obj(ctx).and_then(|obj| obj.protos.get(meth))
+        let mut current = Some(*self);
+        for _ in 0..=ctx.types.len() {
+            let object = ctx.types.get(current?.0)?.get_type_obj()?;
+            if let Some(prototype) = object
+                .protos
+                .iter()
+                .find(|prototype| prototype.pindex >= 0 && prototype.pindex as usize == meth)
+            {
+                return Some(prototype);
+            }
+            current = object.super_;
+        }
+        None
     }
 }
 
@@ -752,25 +774,25 @@ impl AdjustReferences for Function {
         self.t.adjust(mapping.type_offset);
         self.findex.adjust(mapping.function_offset);
         mapping.apply_string(&mut self.name);
-        
+
         if let Some(ref mut parent) = self.parent {
             parent.adjust(mapping.type_offset);
         }
-        
+
         for reg_type in &mut self.regs {
             reg_type.adjust(mapping.type_offset);
         }
-        
+
         for opcode in &mut self.ops {
             opcode.adjust_references(mapping);
         }
-        
+
         if let Some(ref mut assigns) = self.assigns {
             for (name, _) in assigns {
                 mapping.apply_string(name);
             }
         }
-        
+
         if let Some(ref mut dbg) = self.debug_info {
             for (file_idx, _line) in dbg.iter_mut() {
                 *file_idx += mapping.debug_file_offset;
@@ -789,7 +811,9 @@ impl Index<Reg> for Function {
 }
 
 /// Index reference to a function or a native in the pool (findex)
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Default, Serialize, Deserialize,
+)]
 pub struct RefFun(pub usize);
 
 impl RefFun {

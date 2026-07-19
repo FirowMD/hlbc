@@ -7,11 +7,11 @@ The files in this directory are used to test the decompiler output.
 To build a particular source file :
 
 ```shell
-haxe -hl <file>.hl -main <file>.hx
+haxe -cp data -main <ClassName> -hl data/<ClassName>.hl
 ```
 
 Or with [just](https://just.systems) :
 
 ```shell
-just build <file>
+just fixtures
 ```

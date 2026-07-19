@@ -3,7 +3,539 @@ use crate::types::{
     RefGlobal, RefInt, RefString, RefType, Reg,
 };
 use crate::{AdjustReferences, IndexMapping};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+
+/// Static description of one opcode operand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct OperandMetadata {
+    pub name: &'static str,
+    pub kind: &'static str,
+}
+
+/// Static metadata generated from the [`Opcode`] declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct OpcodeMetadata {
+    pub code: u8,
+    pub name: &'static str,
+    pub operands: &'static [OperandMetadata],
+    pub semantics: &'static OpcodeSemantics,
+}
+
+/// Observable runtime effects beyond register reads and writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum SideEffect {
+    Call,
+    Allocation,
+    MemoryRead,
+    MemoryWrite,
+    GlobalRead,
+    GlobalWrite,
+    ReferenceAlias,
+    ReferenceRead,
+    ReferenceWrite,
+    ExceptionState,
+    DebugBreak,
+    Prefetch,
+    InlineAssembly,
+}
+
+/// How execution continues after an opcode completes normally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ControlFlowBehavior {
+    Fallthrough,
+    ConditionalBranch,
+    UnconditionalBranch,
+    Switch,
+    Return,
+    Throw,
+    TrapSetup,
+    TrapEnd,
+    Label,
+    CatchMarker,
+    Unknown,
+}
+
+/// Exceptions or runtime faults an opcode can cause directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum PossibleException {
+    Arithmetic,
+    Callee,
+    NullReference,
+    Bounds,
+    Cast,
+    DynamicAccess,
+    MemoryFault,
+    ExplicitThrow,
+    AssertionFailure,
+    InvalidVirtualDispatch,
+    InlineAssembly,
+}
+
+/// Declarative semantics for one opcode.
+///
+/// Register names refer to fields in [`OpcodeMetadata::operands`]. `args` denotes
+/// every register in a variadic operand and `this` denotes implicit register 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct OpcodeSemantics {
+    pub reads: &'static [&'static str],
+    pub writes: &'static [&'static str],
+    pub side_effects: &'static [SideEffect],
+    pub control_flow: ControlFlowBehavior,
+    pub exceptions: &'static [PossibleException],
+}
+
+macro_rules! semantic {
+    ($reads:expr, $writes:expr) => {
+        OpcodeSemantics {
+            reads: $reads,
+            writes: $writes,
+            side_effects: &[],
+            control_flow: ControlFlowBehavior::Fallthrough,
+            exceptions: &[],
+        }
+    };
+    ($reads:expr, $writes:expr, $effects:expr, $flow:ident, $exceptions:expr) => {
+        OpcodeSemantics {
+            reads: $reads,
+            writes: $writes,
+            side_effects: $effects,
+            control_flow: ControlFlowBehavior::$flow,
+            exceptions: $exceptions,
+        }
+    };
+}
+
+/// Opcode semantics in the same wire order as [`Opcode::METADATA`].
+pub const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
+    semantic!(&["src"], &["dst"]),    // Mov
+    semantic!(&[], &["dst"]),         // Int
+    semantic!(&[], &["dst"]),         // Float
+    semantic!(&[], &["dst"]),         // Bool
+    semantic!(&[], &["dst"]),         // Bytes
+    semantic!(&[], &["dst"]),         // String
+    semantic!(&[], &["dst"]),         // Null
+    semantic!(&["a", "b"], &["dst"]), // Add
+    semantic!(&["a", "b"], &["dst"]), // Sub
+    semantic!(&["a", "b"], &["dst"]), // Mul
+    semantic!(
+        &["a", "b"],
+        &["dst"],
+        &[],
+        Fallthrough,
+        &[PossibleException::Arithmetic]
+    ), // SDiv
+    semantic!(
+        &["a", "b"],
+        &["dst"],
+        &[],
+        Fallthrough,
+        &[PossibleException::Arithmetic]
+    ), // UDiv
+    semantic!(
+        &["a", "b"],
+        &["dst"],
+        &[],
+        Fallthrough,
+        &[PossibleException::Arithmetic]
+    ), // SMod
+    semantic!(
+        &["a", "b"],
+        &["dst"],
+        &[],
+        Fallthrough,
+        &[PossibleException::Arithmetic]
+    ), // UMod
+    semantic!(&["a", "b"], &["dst"]), // Shl
+    semantic!(&["a", "b"], &["dst"]), // SShr
+    semantic!(&["a", "b"], &["dst"]), // UShr
+    semantic!(&["a", "b"], &["dst"]), // And
+    semantic!(&["a", "b"], &["dst"]), // Or
+    semantic!(&["a", "b"], &["dst"]), // Xor
+    semantic!(&["src"], &["dst"]),    // Neg
+    semantic!(&["src"], &["dst"]),    // Not
+    semantic!(&["dst"], &["dst"]),    // Incr
+    semantic!(&["dst"], &["dst"]),    // Decr
+    semantic!(
+        &[],
+        &["dst"],
+        &[SideEffect::Call],
+        Fallthrough,
+        &[PossibleException::Callee]
+    ), // Call0
+    semantic!(
+        &["arg0"],
+        &["dst"],
+        &[SideEffect::Call],
+        Fallthrough,
+        &[PossibleException::Callee]
+    ), // Call1
+    semantic!(
+        &["arg0", "arg1"],
+        &["dst"],
+        &[SideEffect::Call],
+        Fallthrough,
+        &[PossibleException::Callee]
+    ), // Call2
+    semantic!(
+        &["arg0", "arg1", "arg2"],
+        &["dst"],
+        &[SideEffect::Call],
+        Fallthrough,
+        &[PossibleException::Callee]
+    ), // Call3
+    semantic!(
+        &["arg0", "arg1", "arg2", "arg3"],
+        &["dst"],
+        &[SideEffect::Call],
+        Fallthrough,
+        &[PossibleException::Callee]
+    ), // Call4
+    semantic!(
+        &["args"],
+        &["dst"],
+        &[SideEffect::Call],
+        Fallthrough,
+        &[PossibleException::Callee]
+    ), // CallN
+    semantic!(
+        &["args"],
+        &["dst"],
+        &[SideEffect::Call, SideEffect::MemoryRead],
+        Fallthrough,
+        &[PossibleException::Callee, PossibleException::NullReference]
+    ), // CallMethod
+    semantic!(
+        &["this", "args"],
+        &["dst"],
+        &[SideEffect::Call, SideEffect::MemoryRead],
+        Fallthrough,
+        &[PossibleException::Callee, PossibleException::NullReference]
+    ), // CallThis
+    semantic!(
+        &["fun", "args"],
+        &["dst"],
+        &[SideEffect::Call],
+        Fallthrough,
+        &[PossibleException::Callee, PossibleException::NullReference]
+    ), // CallClosure
+    semantic!(&[], &["dst"], &[SideEffect::Allocation], Fallthrough, &[]), // StaticClosure
+    semantic!(
+        &["obj"],
+        &["dst"],
+        &[SideEffect::Allocation, SideEffect::ReferenceAlias],
+        Fallthrough,
+        &[]
+    ), // InstanceClosure
+    semantic!(
+        &["obj"],
+        &["dst"],
+        &[
+            SideEffect::Allocation,
+            SideEffect::MemoryRead,
+            SideEffect::ReferenceAlias
+        ],
+        Fallthrough,
+        &[
+            PossibleException::NullReference,
+            PossibleException::InvalidVirtualDispatch
+        ]
+    ), // VirtualClosure
+    semantic!(&[], &["dst"], &[SideEffect::GlobalRead], Fallthrough, &[]), // GetGlobal
+    semantic!(&["src"], &[], &[SideEffect::GlobalWrite], Fallthrough, &[]), // SetGlobal
+    semantic!(
+        &["obj"],
+        &["dst"],
+        &[SideEffect::MemoryRead],
+        Fallthrough,
+        &[PossibleException::NullReference]
+    ), // Field
+    semantic!(
+        &["obj", "src"],
+        &[],
+        &[SideEffect::MemoryWrite],
+        Fallthrough,
+        &[PossibleException::NullReference]
+    ), // SetField
+    semantic!(
+        &["this"],
+        &["dst"],
+        &[SideEffect::MemoryRead],
+        Fallthrough,
+        &[PossibleException::NullReference]
+    ), // GetThis
+    semantic!(
+        &["this", "src"],
+        &[],
+        &[SideEffect::MemoryWrite],
+        Fallthrough,
+        &[PossibleException::NullReference]
+    ), // SetThis
+    semantic!(
+        &["obj"],
+        &["dst"],
+        &[SideEffect::MemoryRead],
+        Fallthrough,
+        &[
+            PossibleException::DynamicAccess,
+            PossibleException::NullReference
+        ]
+    ), // DynGet
+    semantic!(
+        &["obj", "src"],
+        &[],
+        &[SideEffect::MemoryWrite],
+        Fallthrough,
+        &[
+            PossibleException::DynamicAccess,
+            PossibleException::NullReference
+        ]
+    ), // DynSet
+    semantic!(&["cond"], &[], &[], ConditionalBranch, &[]), // JTrue
+    semantic!(&["cond"], &[], &[], ConditionalBranch, &[]), // JFalse
+    semantic!(&["reg"], &[], &[], ConditionalBranch, &[]), // JNull
+    semantic!(&["reg"], &[], &[], ConditionalBranch, &[]), // JNotNull
+    semantic!(&["a", "b"], &[], &[], ConditionalBranch, &[]), // JSLt
+    semantic!(&["a", "b"], &[], &[], ConditionalBranch, &[]), // JSGte
+    semantic!(&["a", "b"], &[], &[], ConditionalBranch, &[]), // JSGt
+    semantic!(&["a", "b"], &[], &[], ConditionalBranch, &[]), // JSLte
+    semantic!(&["a", "b"], &[], &[], ConditionalBranch, &[]), // JULt
+    semantic!(&["a", "b"], &[], &[], ConditionalBranch, &[]), // JUGte
+    semantic!(&["a", "b"], &[], &[], ConditionalBranch, &[]), // JNotLt
+    semantic!(&["a", "b"], &[], &[], ConditionalBranch, &[]), // JNotGte
+    semantic!(&["a", "b"], &[], &[], ConditionalBranch, &[]), // JEq
+    semantic!(&["a", "b"], &[], &[], ConditionalBranch, &[]), // JNotEq
+    semantic!(&[], &[], &[], UnconditionalBranch, &[]), // JAlways
+    semantic!(
+        &["src"],
+        &["dst"],
+        &[SideEffect::Allocation],
+        Fallthrough,
+        &[]
+    ), // ToDyn
+    semantic!(&["src"], &["dst"]),    // ToSFloat
+    semantic!(&["src"], &["dst"]),    // ToUFloat
+    semantic!(&["src"], &["dst"]),    // ToInt
+    semantic!(
+        &["src"],
+        &["dst"],
+        &[SideEffect::MemoryRead],
+        Fallthrough,
+        &[PossibleException::Cast]
+    ), // SafeCast
+    semantic!(&["src"], &["dst"]),    // UnsafeCast
+    semantic!(
+        &["src"],
+        &["dst"],
+        &[SideEffect::Allocation, SideEffect::MemoryRead],
+        Fallthrough,
+        &[PossibleException::Cast]
+    ), // ToVirtual
+    semantic!(&[], &[], &[], Label, &[]), // Label
+    semantic!(&["ret"], &[], &[], Return, &[]), // Ret
+    semantic!(
+        &["exc"],
+        &[],
+        &[SideEffect::ExceptionState],
+        Throw,
+        &[PossibleException::ExplicitThrow]
+    ), // Throw
+    semantic!(
+        &["exc"],
+        &[],
+        &[SideEffect::ExceptionState],
+        Throw,
+        &[PossibleException::ExplicitThrow]
+    ), // Rethrow
+    semantic!(&["reg"], &[], &[], Switch, &[]), // Switch
+    semantic!(
+        &["reg"],
+        &[],
+        &[],
+        Fallthrough,
+        &[PossibleException::NullReference]
+    ), // NullCheck
+    semantic!(&[], &["exc"], &[SideEffect::ExceptionState], TrapSetup, &[]), // Trap
+    semantic!(&["exc"], &[], &[SideEffect::ExceptionState], TrapEnd, &[]), // EndTrap
+    semantic!(
+        &["bytes", "index"],
+        &["dst"],
+        &[SideEffect::MemoryRead],
+        Fallthrough,
+        &[PossibleException::MemoryFault]
+    ), // GetI8
+    semantic!(
+        &["bytes", "index"],
+        &["dst"],
+        &[SideEffect::MemoryRead],
+        Fallthrough,
+        &[PossibleException::MemoryFault]
+    ), // GetI16
+    semantic!(
+        &["bytes", "index"],
+        &["dst"],
+        &[SideEffect::MemoryRead],
+        Fallthrough,
+        &[PossibleException::MemoryFault]
+    ), // GetMem
+    semantic!(
+        &["array", "index"],
+        &["dst"],
+        &[SideEffect::MemoryRead],
+        Fallthrough,
+        &[PossibleException::NullReference, PossibleException::Bounds]
+    ), // GetArray
+    semantic!(
+        &["bytes", "index", "src"],
+        &[],
+        &[SideEffect::MemoryWrite],
+        Fallthrough,
+        &[PossibleException::MemoryFault]
+    ), // SetI8
+    semantic!(
+        &["bytes", "index", "src"],
+        &[],
+        &[SideEffect::MemoryWrite],
+        Fallthrough,
+        &[PossibleException::MemoryFault]
+    ), // SetI16
+    semantic!(
+        &["bytes", "index", "src"],
+        &[],
+        &[SideEffect::MemoryWrite],
+        Fallthrough,
+        &[PossibleException::MemoryFault]
+    ), // SetMem
+    semantic!(
+        &["array", "index", "src"],
+        &[],
+        &[SideEffect::MemoryWrite],
+        Fallthrough,
+        &[PossibleException::NullReference, PossibleException::Bounds]
+    ), // SetArray
+    semantic!(&[], &["dst"], &[SideEffect::Allocation], Fallthrough, &[]), // New
+    semantic!(
+        &["array"],
+        &["dst"],
+        &[SideEffect::MemoryRead],
+        Fallthrough,
+        &[PossibleException::NullReference]
+    ), // ArraySize
+    semantic!(&[], &["dst"]),         // Type
+    semantic!(
+        &["src"],
+        &["dst"],
+        &[SideEffect::MemoryRead],
+        Fallthrough,
+        &[]
+    ), // GetType (null maps to Void)
+    semantic!(
+        &["src"],
+        &["dst"],
+        &[SideEffect::MemoryRead],
+        Fallthrough,
+        &[PossibleException::NullReference]
+    ), // GetTID
+    semantic!(
+        &["src"],
+        &["dst"],
+        &[SideEffect::ReferenceAlias],
+        Fallthrough,
+        &[]
+    ), // Ref
+    semantic!(
+        &["src"],
+        &["dst"],
+        &[SideEffect::MemoryRead, SideEffect::ReferenceRead],
+        Fallthrough,
+        &[PossibleException::MemoryFault]
+    ), // Unref
+    semantic!(
+        &["dst", "value"],
+        &[],
+        &[SideEffect::MemoryWrite, SideEffect::ReferenceWrite],
+        Fallthrough,
+        &[PossibleException::MemoryFault]
+    ), // Setref
+    semantic!(
+        &["args"],
+        &["dst"],
+        &[SideEffect::Allocation],
+        Fallthrough,
+        &[]
+    ), // MakeEnum
+    semantic!(&[], &["dst"], &[SideEffect::Allocation], Fallthrough, &[]), // EnumAlloc
+    semantic!(
+        &["value"],
+        &["dst"],
+        &[SideEffect::MemoryRead],
+        Fallthrough,
+        &[PossibleException::NullReference]
+    ), // EnumIndex
+    semantic!(
+        &["value"],
+        &["dst"],
+        &[SideEffect::MemoryRead],
+        Fallthrough,
+        &[PossibleException::NullReference, PossibleException::Bounds]
+    ), // EnumField
+    semantic!(
+        &["value", "src"],
+        &[],
+        &[SideEffect::MemoryWrite],
+        Fallthrough,
+        &[PossibleException::NullReference, PossibleException::Bounds]
+    ), // SetEnumField
+    semantic!(
+        &[],
+        &[],
+        &[SideEffect::DebugBreak],
+        Throw,
+        &[PossibleException::AssertionFailure]
+    ), // Assert
+    semantic!(
+        &["src"],
+        &["dst"],
+        &[SideEffect::ReferenceAlias],
+        Fallthrough,
+        &[]
+    ), // RefData
+    semantic!(
+        &["reg", "offset"],
+        &["dst"],
+        &[SideEffect::ReferenceAlias],
+        Fallthrough,
+        &[]
+    ), // RefOffset
+    semantic!(&[], &[]),              // Nop
+    semantic!(&["value"], &[], &[SideEffect::Prefetch], Fallthrough, &[]), // Prefetch
+    semantic!(
+        &["reg(mode=2)"],
+        &["reg(mode=3)"],
+        &[SideEffect::InlineAssembly],
+        Unknown,
+        &[PossibleException::InlineAssembly]
+    ), // Asm
+    semantic!(&[], &[], &[SideEffect::ExceptionState], CatchMarker, &[]), // Catch
+];
+
+/// A diagnostic-friendly operand value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OpcodeOperand {
+    pub name: &'static str,
+    pub value: String,
+}
+
+/// A concrete register operand extracted from an opcode.
+///
+/// Variadic register operands produce one entry per register. Implicit
+/// registers such as `this` and mode-dependent operands such as [`Opcode::Asm`]
+/// are described by [`OpcodeSemantics`] and are intentionally not synthesized
+/// here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct OpcodeRegisterOperand {
+    pub name: &'static str,
+    pub register: Reg,
+}
 
 /// Opcodes definitions. The fields are the opcode arguments.
 ///
@@ -12,7 +544,8 @@ use serde::{Serialize, Deserialize};
 /// comment on each variant.
 ///
 /// The order of opcodes here is important as it defines the number used for serialization.
-#[derive(Debug, Clone, hlbc_derive::OpcodeHelper, Serialize, Deserialize)]
+#[rustfmt::skip]
+#[derive(Debug, Clone, PartialEq, hlbc_derive::OpcodeHelper, Serialize, Deserialize)]
 pub enum Opcode {
     /// Copy value from *src* into *dst*
     ///
@@ -285,13 +818,14 @@ pub enum Opcode {
         fun: RefFun,
         obj: Reg,
     },
-    /// Create a closure from an object field.
+    /// Create a closure from a virtual method prototype and capture its receiver.
     ///
-    /// `dst = obj.field`
+    /// `dst = closure(obj.method)`
     VirtualClosure {
         dst: Reg,
         obj: Reg,
-        field: Reg,
+        /// Prototype index in the receiver's object type.
+        field: RefField,
     },
     /// Get a global value.
     ///
@@ -650,9 +1184,9 @@ pub enum Opcode {
         dst: Reg,
         src: Reg,
     },
-    /// Get the type kind identifier of a value. Useful for switch statements on types.
+    /// Get the runtime type kind identifier of a value. Useful for switch statements on types.
     ///
-    /// `dst = typeof src`
+    /// `dst = (typeof src).kind`
     GetTID {
         dst: Reg,
         src: Reg,
@@ -719,11 +1253,16 @@ pub enum Opcode {
     },
     /// Debug break, calls `hl_assert()` under the hood.
     Assert,
-    // Not sure what those last 2 opcodes do.
+    /// Get a reference to the first element of an array's data storage.
+    ///
+    /// `dst = &src[0]`
     RefData {
         dst: Reg,
         src: Reg,
     },
+    /// Offset a reference by `offset` elements of the referenced type.
+    ///
+    /// `dst = reg + offset * sizeof(*reg)`
     RefOffset {
         dst: Reg,
         reg: Reg,
@@ -735,7 +1274,7 @@ pub enum Opcode {
     Prefetch {
         /// Value to prefetch
         value: Reg,
-        /// Non-zero if we are accessing a field in value.
+        /// Encoded field selector: zero prefetches the value, otherwise this is field index + 1.
         field: RefField,
         /// https://github.com/HaxeFoundation/hashlink/blob/733b6a14a0a7e7cfba6c21cdf0ee03595cafafb4/src/jit.c#L4310
         /// https://www.felixcloutier.com/x86/prefetchh
@@ -750,11 +1289,19 @@ pub enum Opcode {
         /// Warning ! Only non-zero values indicates valid reg. Register index is reg-1.
         reg: Reg,
     },
+    /// Type metadata marker emitted immediately after [`Opcode::Trap`].
+    /// HashLink declares its wire operand with the `J` encoding, but the value
+    /// is a global type-object index rather than a CFG branch displacement.
+    Catch {
+        offset: JumpOffset,
+    },
 }
 
 #[cfg(test)]
 mod test {
-    use crate::opcodes::Opcode;
+    use std::io::Cursor;
+
+    use crate::opcodes::{Opcode, OPCODE_SEMANTICS};
     use crate::types::Reg;
 
     #[test]
@@ -772,6 +1319,135 @@ mod test {
             Opcode::Null { dst: Reg(0) }.description()
         );
     }
+
+    #[test]
+    fn every_hashlink_opcode_has_metadata_and_round_trips() -> crate::Result<()> {
+        let expected = [
+            "Mov",
+            "Int",
+            "Float",
+            "Bool",
+            "Bytes",
+            "String",
+            "Null",
+            "Add",
+            "Sub",
+            "Mul",
+            "SDiv",
+            "UDiv",
+            "SMod",
+            "UMod",
+            "Shl",
+            "SShr",
+            "UShr",
+            "And",
+            "Or",
+            "Xor",
+            "Neg",
+            "Not",
+            "Incr",
+            "Decr",
+            "Call0",
+            "Call1",
+            "Call2",
+            "Call3",
+            "Call4",
+            "CallN",
+            "CallMethod",
+            "CallThis",
+            "CallClosure",
+            "StaticClosure",
+            "InstanceClosure",
+            "VirtualClosure",
+            "GetGlobal",
+            "SetGlobal",
+            "Field",
+            "SetField",
+            "GetThis",
+            "SetThis",
+            "DynGet",
+            "DynSet",
+            "JTrue",
+            "JFalse",
+            "JNull",
+            "JNotNull",
+            "JSLt",
+            "JSGte",
+            "JSGt",
+            "JSLte",
+            "JULt",
+            "JUGte",
+            "JNotLt",
+            "JNotGte",
+            "JEq",
+            "JNotEq",
+            "JAlways",
+            "ToDyn",
+            "ToSFloat",
+            "ToUFloat",
+            "ToInt",
+            "SafeCast",
+            "UnsafeCast",
+            "ToVirtual",
+            "Label",
+            "Ret",
+            "Throw",
+            "Rethrow",
+            "Switch",
+            "NullCheck",
+            "Trap",
+            "EndTrap",
+            "GetI8",
+            "GetI16",
+            "GetMem",
+            "GetArray",
+            "SetI8",
+            "SetI16",
+            "SetMem",
+            "SetArray",
+            "New",
+            "ArraySize",
+            "Type",
+            "GetType",
+            "GetTID",
+            "Ref",
+            "Unref",
+            "Setref",
+            "MakeEnum",
+            "EnumAlloc",
+            "EnumIndex",
+            "EnumField",
+            "SetEnumField",
+            "Assert",
+            "RefData",
+            "RefOffset",
+            "Nop",
+            "Prefetch",
+            "Asm",
+            "Catch",
+        ];
+
+        assert_eq!(Opcode::COUNT, expected.len());
+        assert_eq!(Opcode::COUNT, OPCODE_SEMANTICS.len());
+        assert_eq!(
+            Opcode::METADATA.iter().map(|m| m.name).collect::<Vec<_>>(),
+            expected
+        );
+
+        for opcode in Opcode::all_defaults() {
+            let mut bytes = Vec::new();
+            opcode.write(&mut bytes)?;
+            let decoded = Opcode::read(&mut Cursor::new(bytes))?;
+            assert_eq!(decoded, opcode, "{} did not round-trip", opcode.name());
+            assert_eq!(opcode.metadata().name, opcode.name());
+            assert_eq!(opcode.metadata().operands.len(), opcode.operands().len());
+            assert_eq!(
+                opcode.metadata().semantics,
+                &OPCODE_SEMANTICS[opcode.code() as usize]
+            );
+        }
+        Ok(())
+    }
 }
 
 impl AdjustReferences for Opcode {
@@ -782,70 +1458,68 @@ impl AdjustReferences for Opcode {
             Opcode::Float { ptr, .. } => ptr.adjust(mapping.float_offset),
             Opcode::String { ptr, .. } => mapping.apply_string(ptr),
             Opcode::Bytes { ptr, .. } => ptr.adjust(mapping.bytes_offset),
-            
+
             // Function calls
-            Opcode::Call0 { fun, .. } | 
-            Opcode::Call1 { fun, .. } |
-            Opcode::Call2 { fun, .. } | 
-            Opcode::Call3 { fun, .. } |
-            Opcode::Call4 { fun, .. } | 
-            Opcode::CallN { fun, .. } => {
+            Opcode::Call0 { fun, .. }
+            | Opcode::Call1 { fun, .. }
+            | Opcode::Call2 { fun, .. }
+            | Opcode::Call3 { fun, .. }
+            | Opcode::Call4 { fun, .. }
+            | Opcode::CallN { fun, .. } => {
                 fun.adjust(mapping.function_offset);
-            },
-            
+            }
+
             // Closures
-            Opcode::StaticClosure { fun, .. } |
-            Opcode::InstanceClosure { fun, .. } => {
+            Opcode::StaticClosure { fun, .. } | Opcode::InstanceClosure { fun, .. } => {
                 fun.adjust(mapping.function_offset);
-            },
-            
+            }
+
             // Global access
-            Opcode::GetGlobal { global, .. } | 
-            Opcode::SetGlobal { global, .. } => {
+            Opcode::GetGlobal { global, .. } | Opcode::SetGlobal { global, .. } => {
                 global.adjust(mapping.global_offset);
-            },
-            
+            }
+
             // Type operations
             Opcode::Type { ty, .. } => ty.adjust(mapping.type_offset),
-            
+
             // Field operations - need field mapping
-            Opcode::Field { field, .. } | 
-            Opcode::SetField { field, .. } |
-            Opcode::GetThis { field, .. } | 
-            Opcode::SetThis { field, .. } |
-            Opcode::CallMethod { field, .. } | 
-            Opcode::CallThis { field, .. } => {
+            Opcode::Field { field, .. }
+            | Opcode::SetField { field, .. }
+            | Opcode::GetThis { field, .. }
+            | Opcode::SetThis { field, .. }
+            | Opcode::CallMethod { field, .. }
+            | Opcode::CallThis { field, .. } => {
                 if let Some(&mapped_field) = mapping.field_mappings.get(field) {
                     *field = mapped_field;
                 }
-            },
-            
+            }
+
             // Dynamic field access
-            Opcode::DynGet { field, .. } | 
-            Opcode::DynSet { field, .. } => {
+            Opcode::DynGet { field, .. } | Opcode::DynSet { field, .. } => {
                 mapping.apply_string(field);
-            },
-            
+            }
+
             // Enum operations
-            Opcode::MakeEnum { construct, .. } | 
-            Opcode::EnumAlloc { construct, .. } |
-            Opcode::EnumField { construct, .. } => {
+            Opcode::MakeEnum { construct, .. }
+            | Opcode::EnumAlloc { construct, .. }
+            | Opcode::EnumField { construct, .. } => {
                 construct.adjust(mapping.type_offset); // EnumConstruct indexes are part of type system
-            },
-            
+            }
+
             Opcode::SetEnumField { field, .. } => {
                 if let Some(&mapped_field) = mapping.field_mappings.get(field) {
                     *field = mapped_field;
                 }
-            },
-            
+            }
+
             // Prefetch with field reference
-            Opcode::Prefetch { field, .. } => {
-                if let Some(&mapped_field) = mapping.field_mappings.get(field) {
-                    *field = mapped_field;
+            Opcode::Prefetch { field, .. } if field.0 > 0 => {
+                let decoded = RefField(field.0 - 1);
+                if let Some(&mapped_field) = mapping.field_mappings.get(&decoded) {
+                    field.0 = mapped_field.0 + 1;
                 }
-            },
-            
+            }
+
             // All other opcodes don't have references to adjust
             _ => {}
         }

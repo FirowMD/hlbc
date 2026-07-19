@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
@@ -6,37 +6,71 @@ use std::str::from_utf8;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
-use crate::{Bytecode, ConstantDef, Opcode, RefFun, RefFunKnown, RefGlobal, Str};
-use crate::{Error, Result};
 use crate::types::{
     EnumConstruct, Function, Native, ObjField, ObjProto, RefField, RefFloat, RefInt, RefString,
     RefType, Type, TypeFun, TypeObj,
 };
+use crate::{Bytecode, ConstantDef, Opcode, RefFun, RefFunKnown, RefGlobal, Str};
+use crate::{Error, Result};
+
+const MAX_TABLE_ITEMS: usize = 16 * 1024 * 1024;
+const MAX_BLOB_BYTES: usize = 512 * 1024 * 1024;
+
+fn checked_count(r: &mut impl Read, kind: &'static str) -> Result<usize> {
+    let count = read_varu(r)? as usize;
+    if count > MAX_TABLE_ITEMS {
+        Err(Error::CountLimit {
+            kind,
+            count,
+            limit: MAX_TABLE_ITEMS,
+        })
+    } else {
+        Ok(count)
+    }
+}
+
+fn checked_blob_len(r: &mut impl Read, kind: &'static str) -> Result<usize> {
+    let signed = r.read_i32::<LittleEndian>()?;
+    if signed < 0 {
+        return Err(Error::MalformedBytecode(format!(
+            "Negative {kind} byte length {signed}"
+        )));
+    }
+    let count = signed as usize;
+    if count > MAX_BLOB_BYTES {
+        Err(Error::CountLimit {
+            kind,
+            count,
+            limit: MAX_BLOB_BYTES,
+        })
+    } else {
+        Ok(count)
+    }
+}
+
+fn invalid_ref(kind: &'static str, index: usize, len: usize) -> Error {
+    Error::InvalidReference { kind, index, len }
+}
 
 impl Bytecode {
     /// Read the bytecode from a file. This method will skip bytes until the magic header is found.
     ///
     /// It uses a 512KiB buffer.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
-        Self::deserialize(&mut BufReader::with_capacity(512 * 1024, fs::File::open(path)?))
+        Self::deserialize(&mut BufReader::with_capacity(
+            512 * 1024,
+            fs::File::open(path)?,
+        ))
     }
 
-    /// Load the bytecode from any source. This method will skip bytes until the magic header is found.
-    /// This also means it will read bytes indefinitely if it can't find the magic header.
+    /// Load the bytecode from any source. This method skips bytes until the magic header is found.
     pub fn deserialize(mut r: impl BufRead) -> Result<Self> {
-        // Search for the magic header
-        let finder = memchr::memmem::Finder::new("HLB");
-        loop {
-            let buffer = r.fill_buf()?;
-            if let Some(index) = finder.find(buffer) {
-                r.consume(index);
-                return Self::deserialize_exact(&mut r);
-            }
-            let len = buffer.len();
-            // Edge case is when this buffer ends with 'HL', we must not consume
-            // the last 2 bytes, so they can be used for the next search.
-            r.consume(len - 2);
-        }
+        let mut bytes = Vec::new();
+        r.read_to_end(&mut bytes)?;
+        let index = memchr::memmem::find(&bytes, b"HLB").ok_or_else(|| {
+            Error::MalformedBytecode("HashLink magic header not found before end of input".into())
+        })?;
+        Self::deserialize_exact(&mut &bytes[index..])
     }
 
     /// Load the bytecode from any source.
@@ -60,20 +94,20 @@ impl Bytecode {
         }
         let flags = read_varu(r)?;
         let has_debug = flags & 1 == 1;
-        let nints = read_varu(r)? as usize;
-        let nfloats = read_varu(r)? as usize;
-        let nstrings = read_varu(r)? as usize;
+        let nints = checked_count(r, "integer")?;
+        let nfloats = checked_count(r, "float")?;
+        let nstrings = checked_count(r, "string")?;
         let nbytes = if version >= 5 {
-            Some(read_varu(r)? as usize)
+            Some(checked_count(r, "bytes")?)
         } else {
             None
         };
-        let ntypes = read_varu(r)? as usize;
-        let nglobals = read_varu(r)? as usize;
-        let nnatives = read_varu(r)? as usize;
-        let nfunctions = read_varu(r)? as usize;
+        let ntypes = checked_count(r, "type")?;
+        let nglobals = checked_count(r, "global")?;
+        let nnatives = checked_count(r, "native")?;
+        let nfunctions = checked_count(r, "function")?;
         let nconstants = if version >= 4 {
-            Some(read_varu(r)? as usize)
+            Some(checked_count(r, "constant")?)
         } else {
             None
         };
@@ -92,7 +126,7 @@ impl Bytecode {
         let strings = read_strings(r, nstrings)?;
 
         let bytes = if let Some(nbytes) = nbytes {
-            let size = r.read_i32::<LittleEndian>()? as usize;
+            let size = checked_blob_len(r, "bytes")?;
             let mut bytes = vec![0; size];
             r.read_exact(&mut bytes)?;
             let mut pos = Vec::with_capacity(nbytes);
@@ -105,7 +139,7 @@ impl Bytecode {
         };
 
         let debug_files = if has_debug {
-            let n = read_varu(r)? as usize;
+            let n = checked_count(r, "debug file")?;
             Some(read_strings(r, n)?)
         } else {
             None
@@ -144,13 +178,38 @@ impl Bytecode {
         // Parsing is finished, we now build links between everything
 
         // Global function indexes
-        let mut findexes = vec![RefFunKnown::Fun(0); nfunctions + nnatives];
+        let mut findexes = vec![None; nfunctions + nnatives];
         for (i, f) in functions.iter().enumerate() {
-            findexes[f.findex.0] = RefFunKnown::Fun(i);
+            let len = findexes.len();
+            let slot = findexes
+                .get_mut(f.findex.0)
+                .ok_or_else(|| invalid_ref("function index", f.findex.0, len))?;
+            if slot.replace(RefFunKnown::Fun(i)).is_some() {
+                return Err(Error::MalformedBytecode(format!(
+                    "Duplicate function index {}",
+                    f.findex.0
+                )));
+            }
         }
         for (i, n) in natives.iter().enumerate() {
-            findexes[n.findex.0] = RefFunKnown::Native(i);
+            let len = findexes.len();
+            let slot = findexes
+                .get_mut(n.findex.0)
+                .ok_or_else(|| invalid_ref("native function index", n.findex.0, len))?;
+            if slot.replace(RefFunKnown::Native(i)).is_some() {
+                return Err(Error::MalformedBytecode(format!(
+                    "Duplicate function index {}",
+                    n.findex.0
+                )));
+            }
         }
+        let findexes: Vec<_> = findexes
+            .into_iter()
+            .enumerate()
+            .map(|(i, value)| {
+                value.ok_or_else(|| Error::MalformedBytecode(format!("Missing function index {i}")))
+            })
+            .collect::<Result<_>>()?;
 
         // Flatten types fields
         // Start by collecting every field in the hierarchy
@@ -158,14 +217,30 @@ impl Bytecode {
         let mut new_fields: Vec<Option<Vec<ObjField>>> = Vec::with_capacity(types.len());
         for t in &types {
             if let Some(obj) = t.get_type_obj() {
-                let mut parent = obj.super_.as_ref().map(|s| &types[s.0]);
+                let mut parent = obj.super_;
+                let mut seen_parents = HashSet::new();
                 let mut acc = VecDeque::with_capacity(obj.own_fields.len());
                 acc.extend(obj.own_fields.clone());
-                while let Some(p) = parent.and_then(|t| t.get_type_obj()) {
+                while let Some(parent_ref) = parent {
+                    if !seen_parents.insert(parent_ref.0) {
+                        return Err(Error::MalformedBytecode(format!(
+                            "Cycle in object inheritance at type {}",
+                            parent_ref.0
+                        )));
+                    }
+                    let parent_type = types
+                        .get(parent_ref.0)
+                        .ok_or_else(|| invalid_ref("parent type", parent_ref.0, types.len()))?;
+                    let Some(p) = parent_type.get_type_obj() else {
+                        return Err(Error::MalformedBytecode(format!(
+                            "Parent type {} is not an object or struct",
+                            parent_ref.0
+                        )));
+                    };
                     for f in p.own_fields.iter().rev() {
                         acc.push_front(f.clone());
                     }
-                    parent = p.super_.as_ref().map(|s| &types[s.0]);
+                    parent = p.super_;
                 }
                 new_fields.push(Some(acc.into()));
             } else {
@@ -175,28 +250,39 @@ impl Bytecode {
         // Apply new fields
         for (t, new) in types.iter_mut().zip(new_fields.into_iter()) {
             if let Some(fields) = new {
-                t.get_type_obj_mut().unwrap().fields = fields;
+                if let Some(obj) = t.get_type_obj_mut() {
+                    obj.fields = fields;
+                }
             }
         }
 
         // Give functions name based on object fields bindings and methods
         for (i, t) in types.iter().enumerate() {
             if let Some(TypeObj {
-                            protos, bindings, ..
-                        }) = t.get_type_obj()
+                protos, bindings, ..
+            }) = t.get_type_obj()
             {
                 for p in protos {
-                    if let RefFunKnown::Fun(x) = findexes[p.findex.0] {
+                    let target = findexes.get(p.findex.0).ok_or_else(|| {
+                        invalid_ref("prototype function", p.findex.0, findexes.len())
+                    })?;
+                    if let RefFunKnown::Fun(x) = *target {
                         functions[x].name = p.name;
                         functions[x].parent = Some(RefType(i));
                     }
                 }
                 for (fid, findex) in bindings {
-                    if let Some(field) = t.get_type_obj().map(|o| &o.fields[fid.0]) {
-                        if let RefFunKnown::Fun(x) = findexes[findex.0] {
-                            functions[x].name = field.name;
-                            functions[x].parent = Some(RefType(i));
-                        }
+                    let field_len = t.get_type_obj().map_or(0, |o| o.fields.len());
+                    let field = t
+                        .get_type_obj()
+                        .and_then(|o| o.fields.get(fid.0))
+                        .ok_or_else(|| invalid_ref("object field", fid.0, field_len))?;
+                    let target = findexes
+                        .get(findex.0)
+                        .ok_or_else(|| invalid_ref("binding function", findex.0, findexes.len()))?;
+                    if let RefFunKnown::Fun(x) = *target {
+                        functions[x].name = field.name;
+                        functions[x].parent = Some(RefType(i));
                     }
                 }
             }
@@ -206,13 +292,23 @@ impl Bytecode {
         let mut fnames = HashMap::with_capacity(functions.len());
         for (i, f) in functions.iter().enumerate() {
             // FIXME duplicates ?
-            fnames.insert(strings[f.name.0].clone(), i);
+            let name = strings
+                .get(f.name.0)
+                .ok_or_else(|| invalid_ref("function name", f.name.0, strings.len()))?;
+            fnames.insert(name.clone(), i);
         }
+        let entry = findexes
+            .get(entrypoint.0)
+            .ok_or_else(|| invalid_ref("entrypoint", entrypoint.0, findexes.len()))?;
         fnames.insert(
             Str::from("init"),
-            match findexes[entrypoint.0] {
+            match *entry {
                 RefFunKnown::Fun(x) => x,
-                _ => 0,
+                RefFunKnown::Native(_) => {
+                    return Err(Error::MalformedBytecode(
+                        "Entrypoint references a native function".into(),
+                    ))
+                }
             },
         );
 
@@ -226,7 +322,7 @@ impl Bytecode {
             HashMap::new()
         };
 
-        Ok(Bytecode {
+        let code = Bytecode {
             version,
             entrypoint,
             ints,
@@ -242,49 +338,51 @@ impl Bytecode {
             findexes,
             fnames,
             globals_initializers,
-        })
+        };
+        code.validate()?;
+        Ok(code)
     }
 }
 
 impl RefInt {
     pub(crate) fn read(r: &mut impl Read) -> Result<Self> {
-        Ok(Self(read_vari(r)? as usize))
+        Ok(Self(read_varu(r)? as usize))
     }
 }
 
 impl RefFloat {
     pub(crate) fn read(r: &mut impl Read) -> Result<Self> {
-        Ok(Self(read_vari(r)? as usize))
+        Ok(Self(read_varu(r)? as usize))
     }
 }
 
 impl RefString {
     pub(crate) fn read(r: &mut impl Read) -> Result<Self> {
-        Ok(Self(read_vari(r)? as usize))
+        Ok(Self(read_varu(r)? as usize))
     }
 }
 
 impl RefGlobal {
     pub(crate) fn read(r: &mut impl Read) -> Result<Self> {
-        Ok(Self(read_vari(r)? as usize))
+        Ok(Self(read_varu(r)? as usize))
     }
 }
 
 impl RefFun {
     pub(crate) fn read(r: &mut impl Read) -> Result<Self> {
-        Ok(Self(read_vari(r)? as usize))
+        Ok(Self(read_varu(r)? as usize))
     }
 }
 
 impl RefType {
     pub(crate) fn read(r: &mut impl Read) -> Result<Self> {
-        Ok(Self(read_vari(r)? as usize))
+        Ok(Self(read_varu(r)? as usize))
     }
 }
 
 impl RefField {
     pub(crate) fn read(r: &mut impl Read) -> Result<Self> {
-        Ok(Self(read_vari(r)? as usize))
+        Ok(Self(read_varu(r)? as usize))
     }
 }
 
@@ -316,9 +414,9 @@ impl TypeObj {
         let name = RefString::read(r)?;
         let super_ = read_vari(r)?;
         let global = RefGlobal::read(r)?;
-        let nfields = read_varu(r)? as usize;
-        let nprotos = read_varu(r)? as usize;
-        let nbindings = read_varu(r)? as usize;
+        let nfields = checked_count(r, "object field")?;
+        let nprotos = checked_count(r, "object prototype")?;
+        let nbindings = checked_count(r, "object binding")?;
         let mut own_fields = Vec::with_capacity(nfields);
         for _ in 0..nfields {
             own_fields.push(ObjField::read(r)?);
@@ -371,7 +469,7 @@ impl Type {
             13 => Ok(Type),
             14 => Ok(Ref(RefType::read(r)?)),
             15 => {
-                let nfields = read_varu(r)? as usize;
+                let nfields = checked_count(r, "virtual field")?;
                 let mut fields = Vec::with_capacity(nfields);
                 for _ in 0..nfields {
                     fields.push(ObjField::read(r)?);
@@ -385,11 +483,11 @@ impl Type {
             18 => {
                 let name = RefString::read(r)?;
                 let global = RefGlobal::read(r)?;
-                let nconstructs = read_varu(r)? as usize;
+                let nconstructs = checked_count(r, "enum constructor")?;
                 let mut constructs = Vec::with_capacity(nconstructs);
                 for _ in 0..nconstructs {
                     let name = RefString::read(r)?;
-                    let nparams = read_varu(r)? as usize;
+                    let nparams = checked_count(r, "enum parameter")?;
                     let mut params = Vec::with_capacity(nparams);
                     for _ in 0..nparams {
                         params.push(RefType::read(r)?);
@@ -428,8 +526,8 @@ impl Function {
     pub(crate) fn read(r: &mut impl Read, has_debug: bool, version: u8) -> Result<Self> {
         let t = RefType::read(r)?;
         let findex = RefFun::read(r)?;
-        let nregs = read_varu(r)? as usize;
-        let nops = read_varu(r)? as usize;
+        let nregs = checked_count(r, "function register")?;
+        let nops = checked_count(r, "function opcode")?;
         let mut regs = Vec::with_capacity(nregs);
         for _ in 0..nregs {
             regs.push(RefType::read(r)?);
@@ -477,7 +575,7 @@ impl Function {
         };
 
         let assigns = if has_debug && version >= 3 {
-            let len = read_varu(r)? as usize;
+            let len = checked_count(r, "debug assignment")?;
             let mut assigns = Vec::with_capacity(len);
             for _ in 0..len {
                 assigns.push((RefString::read(r)?, read_vari(r)? as usize));
@@ -502,7 +600,7 @@ impl Function {
 impl ConstantDef {
     pub(crate) fn read(r: &mut impl Read) -> Result<Self> {
         let global = RefGlobal::read(r)?;
-        let nfields = read_varu(r)? as usize;
+        let nfields = checked_count(r, "constant field")?;
         let mut fields = Vec::with_capacity(nfields);
         for _ in 0..nfields {
             fields.push(read_varu(r)? as usize);
@@ -540,16 +638,23 @@ pub(crate) fn read_varu(r: &mut impl Read) -> Result<u32> {
 
 fn read_strings(r: &mut impl Read, nstrings: usize) -> Result<Vec<Str>> {
     let mut strings = Vec::with_capacity(nstrings);
-    let mut string_data = vec![0u8; r.read_i32::<LittleEndian>()? as usize];
+    let mut string_data = vec![0u8; checked_blob_len(r, "string")?];
     r.read_exact(&mut string_data)?;
-    let mut acc = 0;
+    let mut acc: usize = 0;
     for _ in 0..nstrings {
         let ssize = read_varu(r)? as usize + 1;
         //println!("size: {ssize} {:?}", &string_data[acc..(acc + ssize)]);
         //let cstr = unsafe { CStr::from_bytes_with_nul_unchecked(&string_data[acc..(acc + ssize)]) };
-        strings.push(Str::from_ref(from_utf8(
-            &string_data[acc..(acc + ssize - 1)],
-        )?));
+        let end = acc
+            .checked_add(ssize)
+            .ok_or_else(|| Error::MalformedBytecode("String table offset overflow".into()))?;
+        if end > string_data.len() || ssize == 0 {
+            return Err(Error::MalformedBytecode(format!(
+                "String table entry extends past blob (end {end}, blob {})",
+                string_data.len()
+            )));
+        }
+        strings.push(Str::from_ref(from_utf8(&string_data[acc..end - 1])?));
         acc += ssize;
     }
     Ok(strings)
@@ -557,79 +662,36 @@ fn read_strings(r: &mut impl Read, nstrings: usize) -> Result<Vec<Str>> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use std::fs;
-    use std::io::{BufWriter, Write};
 
     use crate::Bytecode;
 
     #[test]
     fn test_deserialize_all() {
         let dir = "../../data";
-        if !std::path::Path::new(dir).is_dir() {
-            return;
-        }
+        let mut discovered = 0;
         for entry in fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
             if let Some(ext) = path.extension() {
                 if ext == "hl" {
+                    discovered += 1;
                     let code = Bytecode::from_file(&path);
-                    assert!(code.is_ok());
+                    assert!(code.is_ok(), "{}: {:?}", path.display(), code.err());
                 }
             }
         }
-    }
-
-    #[test]
-    fn test_deserialize_wartales() {
-        let path = "E:\\Games\\Wartales\\hlboot.dat";
-        if !std::path::Path::new(path).is_file() {
-            return;
-        }
-        let code = Bytecode::from_file(path);
-        assert!(code.is_ok());
-    }
-
-    #[test]
-    fn test_deserialize_northgard() {
-        let path = "E:\\Games\\Northgard\\hlboot.dat";
-        if !std::path::Path::new(path).is_file() {
-            return;
-        }
-        let code = Bytecode::from_file(path);
-        assert!(code.is_ok());
-    }
-
-    #[test]
-    fn test_deserialize_deadcells() {
-        let path = "E:\\Games\\DeadCells\\deadcells.exe";
-        if !std::path::Path::new(path).is_file() {
-            return;
-        }
-        let code = Bytecode::from_file(path);
-        assert!(code.is_ok());
-        // dbg!(code);
-    }
-
-    //#[test]
-    fn list_strings() {
-        let code = Bytecode::from_file("E:\\Games\\Northgard\\hlboot.dat").unwrap();
-        let code2 = Bytecode::from_file("E:\\Games\\Wartales\\hlboot.dat").unwrap();
-        let mut file = BufWriter::new(
-            fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open("strings.txt")
-                .unwrap(),
+        assert!(
+            discovered > 0,
+            "zero .hl fixtures found; compile data/*.hx first"
         );
-        let mut set = HashSet::with_capacity(code.strings.len() + code2.strings.len());
-        set.extend(code.strings);
-        set.extend(code2.strings);
-        for s in &set {
-            file.write(s.as_bytes()).unwrap();
-            file.write(b"\n").unwrap();
-        }
+    }
+
+    #[test]
+    fn test_deserialize_optional_stress_input() {
+        let Some(path) = std::env::var_os("HLBC_HLBOOT") else {
+            return;
+        };
+        assert!(Bytecode::from_file(path).is_ok());
     }
 
     #[test]

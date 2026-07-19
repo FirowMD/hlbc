@@ -65,7 +65,7 @@ mod tests {
             return;
         }
         let code = Bytecode::from_file(path).unwrap();
-        let files = files_in_function(&code, code.entrypoint());
+        let files = files_in_function(&code, code.entrypoint().unwrap());
         dbg!(files);
     }
 }

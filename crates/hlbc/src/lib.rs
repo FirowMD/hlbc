@@ -13,8 +13,8 @@ use std::ops::Index;
 
 use crate::opcodes::Opcode;
 use crate::types::{
-    ConstantDef, FunPtr, Function, Native, ObjField, RefFloat, RefFun, RefGlobal, RefInt,
-    RefString, RefType, Type, TypeObj, RefField,
+    ConstantDef, FunPtr, Function, Native, ObjField, RefField, RefFloat, RefFun, RefGlobal, RefInt,
+    RefString, RefType, Type, TypeObj,
 };
 
 pub mod analysis;
@@ -28,6 +28,7 @@ mod read;
 /// They are required since we cannot use rust references as that would make our structure self-referential.
 /// They makes the code look a bit more complicated than it actually is. Every Ref* struct is cheaply copyable.
 pub mod types;
+mod validate;
 /// All about writing bytecode
 mod write;
 
@@ -103,6 +104,18 @@ pub enum Error {
     UnsupportedVersion { version: u8, min: u8, max: u8 },
     #[error("Value '{value}' is too big to be serialized (|expected| < {limit})")]
     ValueOutOfBounds { value: i32, limit: u32 },
+    #[error("Invalid {kind} reference {index} (table length: {len})")]
+    InvalidReference {
+        kind: &'static str,
+        index: usize,
+        len: usize,
+    },
+    #[error("Bytecode {kind} count {count} exceeds the safety limit {limit}")]
+    CountLimit {
+        kind: &'static str,
+        count: usize,
+        limit: usize,
+    },
     #[error(transparent)]
     IoError(#[from] std::io::Error),
     #[error(transparent)]
@@ -153,27 +166,37 @@ pub struct Bytecode {
 
 impl Bytecode {
     /// Safe version of get for RefFun, to be used everywhere deref is non-critical.
-    pub fn safe_get_ref_fun(&self, index: RefFun) -> Option<FunPtr> {
+    pub fn safe_get_ref_fun(&self, index: RefFun) -> Option<FunPtr<'_>> {
         let findex = self.findexes.get(index.0)?;
         match *findex {
             RefFunKnown::Fun(fun) => self.functions.get(fun).map(FunPtr::Fun),
             RefFunKnown::Native(n) => self.natives.get(n).map(FunPtr::Native),
         }
     }
-    /// Get the entrypoint function.
-    pub fn entrypoint(&self) -> &Function {
-        self.get(self.entrypoint).as_fn().unwrap()
+    /// Get the entrypoint function without assuming a valid reference.
+    pub fn entrypoint(&self) -> Result<&Function> {
+        self.safe_get_ref_fun(self.entrypoint)
+            .and_then(FunPtr::as_fn)
+            .ok_or(Error::InvalidReference {
+                kind: "entrypoint function",
+                index: self.entrypoint.0,
+                len: self.findexes.len(),
+            })
     }
 
     /// Get the main function.
-    /// This will panic if there is no main function in the bytecode (there should always be one)
-    pub fn main(&self) -> &Function {
-        &self.functions[*self.fnames.get("main").unwrap()]
+    pub fn main(&self) -> Result<&Function> {
+        self.fnames
+            .get("main")
+            .and_then(|&index| self.functions.get(index))
+            .ok_or_else(|| Error::MalformedBytecode("Main function not found".into()))
     }
 
     /// Get a function by its name.
     pub fn function_by_name(&self, name: &str) -> Option<&Function> {
-        self.fnames.get(name).map(|&i| &self.functions[i])
+        self.fnames
+            .get(name)
+            .and_then(|&index| self.functions.get(index))
     }
 
     pub fn findex_max(&self) -> usize {
@@ -182,12 +205,17 @@ impl Bytecode {
 
     pub fn functions(&self) -> impl Iterator<Item = FunPtr<'_>> {
         // Iterate over actual pools to avoid holes in findexes
-        self.functions.iter().map(FunPtr::Fun)
+        self.functions
+            .iter()
+            .map(FunPtr::Fun)
             .chain(self.natives.iter().map(FunPtr::Native))
     }
 
     pub fn debug_file(&self, index: usize) -> Option<Str> {
-        self.debug_files.as_ref().map(|files| files[index].clone())
+        self.debug_files
+            .as_ref()
+            .and_then(|files| files.get(index))
+            .cloned()
     }
 
     /// Removes all debug information from the bytecode, including debug files and debug info in functions.
@@ -249,7 +277,11 @@ impl Bytecode {
         }
 
         // Helper: check if two TypeObj/Struct have compatible shape (same own_fields names/types and protos names/types)
-        fn types_shape_compatible(this: &Bytecode, a: &crate::types::TypeObj, b: &crate::types::TypeObj) -> bool {
+        fn types_shape_compatible(
+            this: &Bytecode,
+            a: &crate::types::TypeObj,
+            b: &crate::types::TypeObj,
+        ) -> bool {
             // Compare own_fields length and names
             if a.own_fields.len() != b.own_fields.len() || a.protos.len() != b.protos.len() {
                 return false;
@@ -258,20 +290,74 @@ impl Bytecode {
             for (fa, fb) in a.own_fields.iter().zip(b.own_fields.iter()) {
                 let na = this.get(fa.name);
                 let nb = this.get(fb.name);
-                if na != nb { return false; }
+                if na != nb {
+                    return false;
+                }
                 // Compare type kinds by stringified short marker: we do not rely on indices equality
                 let ta = &this[fa.t];
                 let tb = &this[fb.t];
                 use crate::types::Type::*;
-                let kind_a = match ta { Void=>0, UI8=>1, UI16=>2, I32=>3, I64=>4, F32=>5, F64=>6, Bool=>7, Bytes=>8, Dyn=>9, Fun(_)=>10, Obj(_)=>11, Array=>12, Type=>13, Ref(_)=>14, Virtual{..}=>15, DynObj=>16, Abstract{..}=>17, Enum{..}=>18, Null(_)=>19, Method(_)=>20, Struct(_)=>21, Packed(_)=>22 };
-                let kind_b = match tb { Void=>0, UI8=>1, UI16=>2, I32=>3, I64=>4, F32=>5, F64=>6, Bool=>7, Bytes=>8, Dyn=>9, Fun(_)=>10, Obj(_)=>11, Array=>12, Type=>13, Ref(_)=>14, Virtual{..}=>15, DynObj=>16, Abstract{..}=>17, Enum{..}=>18, Null(_)=>19, Method(_)=>20, Struct(_)=>21, Packed(_)=>22 };
-                if kind_a != kind_b { return false; }
+                let kind_a = match ta {
+                    Void => 0,
+                    UI8 => 1,
+                    UI16 => 2,
+                    I32 => 3,
+                    I64 => 4,
+                    F32 => 5,
+                    F64 => 6,
+                    Bool => 7,
+                    Bytes => 8,
+                    Dyn => 9,
+                    Fun(_) => 10,
+                    Obj(_) => 11,
+                    Array => 12,
+                    Type => 13,
+                    Ref(_) => 14,
+                    Virtual { .. } => 15,
+                    DynObj => 16,
+                    Abstract { .. } => 17,
+                    Enum { .. } => 18,
+                    Null(_) => 19,
+                    Method(_) => 20,
+                    Struct(_) => 21,
+                    Packed(_) => 22,
+                };
+                let kind_b = match tb {
+                    Void => 0,
+                    UI8 => 1,
+                    UI16 => 2,
+                    I32 => 3,
+                    I64 => 4,
+                    F32 => 5,
+                    F64 => 6,
+                    Bool => 7,
+                    Bytes => 8,
+                    Dyn => 9,
+                    Fun(_) => 10,
+                    Obj(_) => 11,
+                    Array => 12,
+                    Type => 13,
+                    Ref(_) => 14,
+                    Virtual { .. } => 15,
+                    DynObj => 16,
+                    Abstract { .. } => 17,
+                    Enum { .. } => 18,
+                    Null(_) => 19,
+                    Method(_) => 20,
+                    Struct(_) => 21,
+                    Packed(_) => 22,
+                };
+                if kind_a != kind_b {
+                    return false;
+                }
             }
             // Proto names and method signature arity (args count + return kind)
             for (pa, pb) in a.protos.iter().zip(b.protos.iter()) {
                 let na = this.get(pa.name);
                 let nb = this.get(pb.name);
-                if na != nb { return false; }
+                if na != nb {
+                    return false;
+                }
                 // Compare function type for methods by looking up funptr signature if resolvable
                 // If not resolvable here, fallback to pindex equality (shape proxy)
                 let (args_a, ret_a) = (0usize, 0u8);
@@ -283,13 +369,14 @@ impl Bytecode {
         }
 
         // Identify duplicate types in `other` vs `self` by name and compatible shape
-        use crate::types::{Type, TypeObj, RefField};
+        use crate::types::{RefField, Type};
         let mut duplicate_type_pairs: Vec<(usize /*other idx*/, usize /*self idx*/)> = Vec::new();
         for (oi, ot) in other.types.iter().enumerate() {
             if let Some(oobj) = ot.get_type_obj() {
                 // Find a type in self with same name
                 let oname = self.get(oobj.name);
-                if let Some((si, sobj)) = self.types
+                if let Some((si, sobj)) = self
+                    .types
                     .iter()
                     .enumerate()
                     .filter_map(|(si, st)| st.get_type_obj().map(|obj| (si, obj)))
@@ -306,9 +393,15 @@ impl Bytecode {
         // Build per-type field mappings for duplicates using flattened fields by name
         // Also pre-apply these mappings to `other` opcodes and TypeObj.bindings so we don't rely on global field_mappings
         use std::collections::HashMap as StdHashMap;
-        let mut per_type_field_maps: StdHashMap<usize /*other type idx*/, StdHashMap<usize /*other field idx*/, usize /*self field idx*/>> = StdHashMap::new();
+        let mut per_type_field_maps: StdHashMap<
+            usize, /*other type idx*/
+            StdHashMap<usize /*other field idx*/, usize /*self field idx*/>,
+        > = StdHashMap::new();
         for (oi, si) in &duplicate_type_pairs {
-            let (oobj, sobj) = match (other.types[*oi].get_type_obj(), self.types[*si].get_type_obj()) {
+            let (oobj, sobj) = match (
+                other.types[*oi].get_type_obj(),
+                self.types[*si].get_type_obj(),
+            ) {
                 (Some(o), Some(s)) => (o, s),
                 _ => continue,
             };
@@ -337,8 +430,13 @@ impl Bytecode {
                     match op {
                         Opcode::Field { obj, field, .. } => {
                             let reg_idx = obj.0 as usize;
-                            if let Some(reg_ty) = func.regs.get(reg_idx).and_then(|rt| other.types.get(rt.0)) {
-                                if let Some((other_type_idx, _self_idx)) = duplicate_type_pairs.iter().find(|(oi, _)| Some(&other.types[*oi]) == Some(reg_ty)) {
+                            if let Some(reg_ty) =
+                                func.regs.get(reg_idx).and_then(|rt| other.types.get(rt.0))
+                            {
+                                if let Some((other_type_idx, _self_idx)) = duplicate_type_pairs
+                                    .iter()
+                                    .find(|(oi, _)| Some(&other.types[*oi]) == Some(reg_ty))
+                                {
                                     if let Some(map) = per_type_field_maps.get(other_type_idx) {
                                         if let Some(&new_idx) = map.get(&field.0) {
                                             *field = RefField(new_idx);
@@ -349,8 +447,13 @@ impl Bytecode {
                         }
                         Opcode::SetField { obj, field, .. } => {
                             let reg_idx = obj.0 as usize;
-                            if let Some(reg_ty) = func.regs.get(reg_idx).and_then(|rt| other.types.get(rt.0)) {
-                                if let Some((other_type_idx, _self_idx)) = duplicate_type_pairs.iter().find(|(oi, _)| Some(&other.types[*oi]) == Some(reg_ty)) {
+                            if let Some(reg_ty) =
+                                func.regs.get(reg_idx).and_then(|rt| other.types.get(rt.0))
+                            {
+                                if let Some((other_type_idx, _self_idx)) = duplicate_type_pairs
+                                    .iter()
+                                    .find(|(oi, _)| Some(&other.types[*oi]) == Some(reg_ty))
+                                {
                                     if let Some(map) = per_type_field_maps.get(other_type_idx) {
                                         if let Some(&new_idx) = map.get(&field.0) {
                                             *field = RefField(new_idx);
@@ -359,10 +462,17 @@ impl Bytecode {
                                 }
                             }
                         }
-                        Opcode::GetThis { field, .. } | Opcode::SetThis { field, .. } | Opcode::CallThis { field, .. } => {
+                        Opcode::GetThis { field, .. }
+                        | Opcode::SetThis { field, .. }
+                        | Opcode::CallThis { field, .. } => {
                             // this is reg0; its type is func.regs[0]
-                            if let Some(reg_ty) = func.regs.get(0).and_then(|rt| other.types.get(rt.0)) {
-                                if let Some((other_type_idx, _self_idx)) = duplicate_type_pairs.iter().find(|(oi, _)| Some(&other.types[*oi]) == Some(reg_ty)) {
+                            if let Some(reg_ty) =
+                                func.regs.get(0).and_then(|rt| other.types.get(rt.0))
+                            {
+                                if let Some((other_type_idx, _self_idx)) = duplicate_type_pairs
+                                    .iter()
+                                    .find(|(oi, _)| Some(&other.types[*oi]) == Some(reg_ty))
+                                {
                                     if let Some(map) = per_type_field_maps.get(other_type_idx) {
                                         if let Some(&new_idx) = map.get(&field.0) {
                                             *field = RefField(new_idx);
@@ -375,8 +485,13 @@ impl Bytecode {
                             // args[0] is the object
                             if let Some(obj_reg) = args.get(0) {
                                 let reg_idx = obj_reg.0 as usize;
-                                if let Some(reg_ty) = func.regs.get(reg_idx).and_then(|rt| other.types.get(rt.0)) {
-                                    if let Some((other_type_idx, _self_idx)) = duplicate_type_pairs.iter().find(|(oi, _)| Some(&other.types[*oi]) == Some(reg_ty)) {
+                                if let Some(reg_ty) =
+                                    func.regs.get(reg_idx).and_then(|rt| other.types.get(rt.0))
+                                {
+                                    if let Some((other_type_idx, _self_idx)) = duplicate_type_pairs
+                                        .iter()
+                                        .find(|(oi, _)| Some(&other.types[*oi]) == Some(reg_ty))
+                                    {
                                         if let Some(map) = per_type_field_maps.get(other_type_idx) {
                                             if let Some(&new_idx) = map.get(&field.0) {
                                                 *field = RefField(new_idx);
@@ -386,12 +501,17 @@ impl Bytecode {
                                 }
                             }
                         }
-                        Opcode::SetEnumField { value, field, .. } | Opcode::Prefetch { value, field, .. } => {
+                        Opcode::SetEnumField { value, field, .. } => {
                             // Prefer using the value register's type to resolve context and remap
                             let reg_idx = value.0 as usize;
                             let mut remapped = false;
-                            if let Some(reg_ty) = func.regs.get(reg_idx).and_then(|rt| other.types.get(rt.0)) {
-                                if let Some((other_type_idx, _self_idx)) = duplicate_type_pairs.iter().find(|(oi, _)| Some(&other.types[*oi]) == Some(reg_ty)) {
+                            if let Some(reg_ty) =
+                                func.regs.get(reg_idx).and_then(|rt| other.types.get(rt.0))
+                            {
+                                if let Some((other_type_idx, _self_idx)) = duplicate_type_pairs
+                                    .iter()
+                                    .find(|(oi, _)| Some(&other.types[*oi]) == Some(reg_ty))
+                                {
                                     if let Some(map) = per_type_field_maps.get(other_type_idx) {
                                         if let Some(&new_idx) = map.get(&field.0) {
                                             *field = RefField(new_idx);
@@ -402,12 +522,34 @@ impl Bytecode {
                             }
                             // Fallback: if value register type is unknown, use `this` type context
                             if !remapped {
-                                if let Some(reg_ty) = func.regs.get(0).and_then(|rt| other.types.get(rt.0)) {
-                                    if let Some((other_type_idx, _self_idx)) = duplicate_type_pairs.iter().find(|(oi, _)| Some(&other.types[*oi]) == Some(reg_ty)) {
+                                if let Some(reg_ty) =
+                                    func.regs.get(0).and_then(|rt| other.types.get(rt.0))
+                                {
+                                    if let Some((other_type_idx, _self_idx)) = duplicate_type_pairs
+                                        .iter()
+                                        .find(|(oi, _)| Some(&other.types[*oi]) == Some(reg_ty))
+                                    {
                                         if let Some(map) = per_type_field_maps.get(other_type_idx) {
                                             if let Some(&new_idx) = map.get(&field.0) {
                                                 *field = RefField(new_idx);
                                             }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Opcode::Prefetch { value, field, .. } if field.0 > 0 => {
+                            let reg_idx = value.0 as usize;
+                            if let Some(reg_ty) =
+                                func.regs.get(reg_idx).and_then(|rt| other.types.get(rt.0))
+                            {
+                                if let Some((other_type_idx, _)) = duplicate_type_pairs
+                                    .iter()
+                                    .find(|(oi, _)| Some(&other.types[*oi]) == Some(reg_ty))
+                                {
+                                    if let Some(map) = per_type_field_maps.get(other_type_idx) {
+                                        if let Some(&new_idx) = map.get(&(field.0 - 1)) {
+                                            field.0 = new_idx + 1;
                                         }
                                     }
                                 }
@@ -421,7 +563,9 @@ impl Bytecode {
 
         // Pre-apply field mapping to TypeObj.bindings of duplicate types
         for (oi, _si) in &duplicate_type_pairs {
-            if let Some(Type::Obj(ref mut oobj)) | Some(Type::Struct(ref mut oobj)) = other.types.get_mut(*oi) {
+            if let Some(Type::Obj(ref mut oobj)) | Some(Type::Struct(ref mut oobj)) =
+                other.types.get_mut(*oi)
+            {
                 if let Some(map) = per_type_field_maps.get(oi) {
                     let mut new_bindings = StdHashMap::new();
                     for (f, fun) in oobj.bindings.clone() {
@@ -438,11 +582,21 @@ impl Bytecode {
         let mut mapping_no_string = mapping.clone();
         mapping_no_string.string_remap = None;
         mapping_no_string.string_offset = 0; // prevent offsetting type names/strings here
-        for typ in &mut other.types { typ.adjust_references(&mapping_no_string); }
+        for typ in &mut other.types {
+            typ.adjust_references(&mapping_no_string);
+        }
         // Adjust references in functions, natives, and constants using full mapping (includes string remap)
-        for func in &mut other.functions { func.adjust_references(&mapping); }
-        for native in &mut other.natives { native.adjust_references(&mapping); }
-        if let Some(ref mut constants) = other.constants { for constant in constants { constant.adjust_references(&mapping); } }
+        for func in &mut other.functions {
+            func.adjust_references(&mapping);
+        }
+        for native in &mut other.natives {
+            native.adjust_references(&mapping);
+        }
+        if let Some(ref mut constants) = other.constants {
+            for constant in constants {
+                constant.adjust_references(&mapping);
+            }
+        }
 
         // Merge the constant pools (strings already handled via remap dedup above)
         self.ints.extend(other.ints);
@@ -453,11 +607,16 @@ impl Bytecode {
             (Some(self_bytes), Some(other_bytes)) => {
                 let original_len = self_bytes.0.len();
                 self_bytes.0.extend(other_bytes.0);
-                self_bytes.1.extend(other_bytes.1.into_iter().map(|offset| offset + original_len));
-            },
+                self_bytes.1.extend(
+                    other_bytes
+                        .1
+                        .into_iter()
+                        .map(|offset| offset + original_len),
+                );
+            }
             (None, Some(other_bytes)) => {
                 self.bytes = Some(other_bytes);
-            },
+            }
             _ => {} // self has bytes but other doesn't, or both are None
         }
 
@@ -465,10 +624,10 @@ impl Bytecode {
         match (&mut self.debug_files, other.debug_files) {
             (Some(self_debug), Some(other_debug)) => {
                 self_debug.extend(other_debug);
-            },
+            }
             (None, Some(other_debug)) => {
                 self.debug_files = Some(other_debug);
-            },
+            }
             _ => {} // self has debug files but other doesn't, or both are None
         }
 
@@ -490,10 +649,10 @@ impl Bytecode {
         match (&mut self.constants, other.constants) {
             (Some(self_constants), Some(other_constants)) => {
                 self_constants.extend(other_constants);
-            },
+            }
             (None, Some(other_constants)) => {
                 self.constants = Some(other_constants);
-            },
+            }
             _ => {} // self has constants but other doesn't, or both are None
         }
 
@@ -519,10 +678,20 @@ impl Bytecode {
             ..Default::default()
         };
 
-        for typ in &mut self.types { typ.adjust_references(&mapping); }
-        for func in &mut self.functions { func.adjust_references(&mapping); }
-        for native in &mut self.natives { native.adjust_references(&mapping); }
-        if let Some(ref mut constants) = self.constants { for constant in constants { constant.adjust_references(&mapping); } }
+        for typ in &mut self.types {
+            typ.adjust_references(&mapping);
+        }
+        for func in &mut self.functions {
+            func.adjust_references(&mapping);
+        }
+        for native in &mut self.natives {
+            native.adjust_references(&mapping);
+        }
+        if let Some(ref mut constants) = self.constants {
+            for constant in constants {
+                constant.adjust_references(&mapping);
+            }
+        }
     }
 
     /// Replace only opcode string references (string literals and dynamic field names).
@@ -666,16 +835,32 @@ mod tests {
     fn make_test_bytecode() -> Bytecode {
         let mut bc = Bytecode::default();
         // strings[0] is implicit null; ensure at least some entries
-        bc.strings = vec![Str::from_static(""), Str::from_static("A"), Str::from_static("B"), Str::from_static("C")];
+        bc.strings = vec![
+            Str::from_static(""),
+            Str::from_static("A"),
+            Str::from_static("B"),
+            Str::from_static("C"),
+        ];
         // Create a function with opcodes that use strings
         let f = Function {
             t: RefType(0),
             findex: RefFun(0),
             regs: vec![],
             ops: vec![
-                Opcode::String { dst: Reg(0), ptr: RefString(1) },
-                Opcode::DynGet { dst: Reg(1), obj: Reg(2), field: RefString(2) },
-                Opcode::DynSet { obj: Reg(3), field: RefString(3), src: Reg(4) },
+                Opcode::String {
+                    dst: Reg(0),
+                    ptr: RefString(1),
+                },
+                Opcode::DynGet {
+                    dst: Reg(1),
+                    obj: Reg(2),
+                    field: RefString(2),
+                },
+                Opcode::DynSet {
+                    obj: Reg(3),
+                    field: RefString(3),
+                    src: Reg(4),
+                },
             ],
             debug_info: None,
             assigns: None,
@@ -684,12 +869,15 @@ mod tests {
         };
         bc.functions.push(f);
         // Minimal type: an object with a name and one field using strings
-        use crate::types::{Type, TypeObj, ObjField};
+        use crate::types::{ObjField, Type, TypeObj};
         bc.types.push(Type::Obj(TypeObj {
             name: RefString(1),
             super_: None,
             global: RefGlobal(0),
-            own_fields: vec![ObjField { name: RefString(2), t: RefType(0) }],
+            own_fields: vec![ObjField {
+                name: RefString(2),
+                t: RefType(0),
+            }],
             protos: vec![],
             bindings: HashMap::new(),
             fields: vec![],
@@ -704,9 +892,18 @@ mod tests {
         let remap = vec![0, 3, 1, 2];
         bc.replace_opcode_string_references(&remap);
         let f = &bc.functions[0];
-        match &f.ops[0] { Opcode::String { ptr, .. } => assert_eq!(ptr.0, 3), _ => unreachable!() }
-        match &f.ops[1] { Opcode::DynGet { field, .. } => assert_eq!(field.0, 1), _ => unreachable!() }
-        match &f.ops[2] { Opcode::DynSet { field, .. } => assert_eq!(field.0, 2), _ => unreachable!() }
+        match &f.ops[0] {
+            Opcode::String { ptr, .. } => assert_eq!(ptr.0, 3),
+            _ => unreachable!(),
+        }
+        match &f.ops[1] {
+            Opcode::DynGet { field, .. } => assert_eq!(field.0, 1),
+            _ => unreachable!(),
+        }
+        match &f.ops[2] {
+            Opcode::DynSet { field, .. } => assert_eq!(field.0, 2),
+            _ => unreachable!(),
+        }
         // Names/metadata untouched
         assert_eq!(f.name.0, 0);
     }
@@ -715,15 +912,26 @@ mod tests {
     fn test_replace_string_references_global() {
         let mut bc = make_test_bytecode();
         // Set function name and a field in types/natives as minimal check
-        if bc.types.is_empty() { bc.types.push(Type::Ref(RefType(0))); }
+        if bc.types.is_empty() {
+            bc.types.push(Type::Ref(RefType(0)));
+        }
         bc.functions[0].name = RefString(1);
         let remap = vec![0, 3, 1, 2];
         bc.replace_string_references(&remap);
         let f = &bc.functions[0];
         // Opcodes remapped via AdjustReferences
-        match &f.ops[0] { Opcode::String { ptr, .. } => assert_eq!(ptr.0, 3), _ => unreachable!() }
-        match &f.ops[1] { Opcode::DynGet { field, .. } => assert_eq!(field.0, 1), _ => unreachable!() }
-        match &f.ops[2] { Opcode::DynSet { field, .. } => assert_eq!(field.0, 2), _ => unreachable!() }
+        match &f.ops[0] {
+            Opcode::String { ptr, .. } => assert_eq!(ptr.0, 3),
+            _ => unreachable!(),
+        }
+        match &f.ops[1] {
+            Opcode::DynGet { field, .. } => assert_eq!(field.0, 1),
+            _ => unreachable!(),
+        }
+        match &f.ops[2] {
+            Opcode::DynSet { field, .. } => assert_eq!(field.0, 2),
+            _ => unreachable!(),
+        }
         // Name remapped globally
         assert_eq!(f.name.0, 3);
     }
@@ -740,13 +948,22 @@ mod tests {
                 assert_eq!(obj.name.0, 3);
                 assert_eq!(obj.own_fields[0].name.0, 1);
             }
-            _ => unreachable!()
+            _ => unreachable!(),
         }
         // Verify opcode strings unchanged
         let f = &bc.functions[0];
-        match &f.ops[0] { Opcode::String { ptr, .. } => assert_eq!(ptr.0, 1), _ => unreachable!() }
-        match &f.ops[1] { Opcode::DynGet { field, .. } => assert_eq!(field.0, 2), _ => unreachable!() }
-        match &f.ops[2] { Opcode::DynSet { field, .. } => assert_eq!(field.0, 3), _ => unreachable!() }
+        match &f.ops[0] {
+            Opcode::String { ptr, .. } => assert_eq!(ptr.0, 1),
+            _ => unreachable!(),
+        }
+        match &f.ops[1] {
+            Opcode::DynGet { field, .. } => assert_eq!(field.0, 2),
+            _ => unreachable!(),
+        }
+        match &f.ops[2] {
+            Opcode::DynSet { field, .. } => assert_eq!(field.0, 3),
+            _ => unreachable!(),
+        }
     }
 
     #[test]
@@ -761,10 +978,7 @@ mod tests {
             t: RefType(0),
             findex: RefFun(0),
             regs: vec![],
-            ops: vec![
-                Opcode::Null { dst: Reg(0) },
-                Opcode::Null { dst: Reg(0) },
-            ],
+            ops: vec![Opcode::Null { dst: Reg(0) }, Opcode::Null { dst: Reg(0) }],
             debug_info: Some(vec![(0, 10), (1, 20)]),
             assigns: None,
             name: RefString(0),
@@ -783,10 +997,7 @@ mod tests {
             t: RefType(0),
             findex: RefFun(0),
             regs: vec![],
-            ops: vec![
-                Opcode::Null { dst: Reg(0) },
-                Opcode::Null { dst: Reg(0) },
-            ],
+            ops: vec![Opcode::Null { dst: Reg(0) }, Opcode::Null { dst: Reg(0) }],
             debug_info: Some(vec![(2, 30), (0, 40)]),
             assigns: None,
             name: RefString(0),
@@ -814,7 +1025,7 @@ mod tests {
 
     #[test]
     fn test_merge_with_string_dedup_across_types_and_opcodes() {
-        use crate::types::{Type, TypeObj, ObjField, ObjProto};
+        use crate::types::{ObjField, ObjProto, Type, TypeObj};
         // Bytecode 1 with strings: "", A, B, X, M, L, DF
         let mut bc1 = Bytecode::default();
         bc1.strings = vec![
@@ -831,8 +1042,15 @@ mod tests {
             name: RefString(1),
             super_: None,
             global: RefGlobal(0),
-            own_fields: vec![ObjField { name: RefString(3), t: RefType(0) }],
-            protos: vec![ObjProto { name: RefString(4), findex: RefFun(0), pindex: 0 }],
+            own_fields: vec![ObjField {
+                name: RefString(3),
+                t: RefType(0),
+            }],
+            protos: vec![ObjProto {
+                name: RefString(4),
+                findex: RefFun(0),
+                pindex: 0,
+            }],
             bindings: HashMap::new(),
             fields: vec![],
         }));
@@ -842,9 +1060,20 @@ mod tests {
             findex: RefFun(0),
             regs: vec![],
             ops: vec![
-                Opcode::String { dst: Reg(0), ptr: RefString(5) },
-                Opcode::DynGet { dst: Reg(1), obj: Reg(2), field: RefString(6) },
-                Opcode::DynSet { obj: Reg(3), field: RefString(3), src: Reg(4) },
+                Opcode::String {
+                    dst: Reg(0),
+                    ptr: RefString(5),
+                },
+                Opcode::DynGet {
+                    dst: Reg(1),
+                    obj: Reg(2),
+                    field: RefString(6),
+                },
+                Opcode::DynSet {
+                    obj: Reg(3),
+                    field: RefString(3),
+                    src: Reg(4),
+                },
             ],
             debug_info: None,
             assigns: None,
@@ -870,8 +1099,15 @@ mod tests {
             name: RefString(2),
             super_: None,
             global: RefGlobal(0),
-            own_fields: vec![ObjField { name: RefString(3), t: RefType(0) }],
-            protos: vec![ObjProto { name: RefString(4), findex: RefFun(0), pindex: 0 }],
+            own_fields: vec![ObjField {
+                name: RefString(3),
+                t: RefType(0),
+            }],
+            protos: vec![ObjProto {
+                name: RefString(4),
+                findex: RefFun(0),
+                pindex: 0,
+            }],
             bindings: HashMap::new(),
             fields: vec![],
         }));
@@ -881,9 +1117,20 @@ mod tests {
             findex: RefFun(0),
             regs: vec![],
             ops: vec![
-                Opcode::String { dst: Reg(0), ptr: RefString(5) },
-                Opcode::DynGet { dst: Reg(1), obj: Reg(2), field: RefString(6) },
-                Opcode::DynSet { obj: Reg(3), field: RefString(7), src: Reg(4) },
+                Opcode::String {
+                    dst: Reg(0),
+                    ptr: RefString(5),
+                },
+                Opcode::DynGet {
+                    dst: Reg(1),
+                    obj: Reg(2),
+                    field: RefString(6),
+                },
+                Opcode::DynSet {
+                    obj: Reg(3),
+                    field: RefString(7),
+                    src: Reg(4),
+                },
             ],
             debug_info: None,
             assigns: None,
@@ -930,14 +1177,32 @@ mod tests {
 
         // Opcode string literal and dynamic field names remapped correctly
         let f1_m = &merged.functions[0];
-        match &f1_m.ops[0] { Opcode::String { ptr, .. } => assert_eq!(ptr.0, 5), _ => unreachable!() }
-        match &f1_m.ops[1] { Opcode::DynGet { field, .. } => assert_eq!(field.0, 6), _ => unreachable!() }
-        match &f1_m.ops[2] { Opcode::DynSet { field, .. } => assert_eq!(field.0, 3), _ => unreachable!() }
+        match &f1_m.ops[0] {
+            Opcode::String { ptr, .. } => assert_eq!(ptr.0, 5),
+            _ => unreachable!(),
+        }
+        match &f1_m.ops[1] {
+            Opcode::DynGet { field, .. } => assert_eq!(field.0, 6),
+            _ => unreachable!(),
+        }
+        match &f1_m.ops[2] {
+            Opcode::DynSet { field, .. } => assert_eq!(field.0, 3),
+            _ => unreachable!(),
+        }
 
         let f2_m = &merged.functions[1];
-        match &f2_m.ops[0] { Opcode::String { ptr, .. } => assert_eq!(ptr.0, 9), _ => unreachable!() }
-        match &f2_m.ops[1] { Opcode::DynGet { field, .. } => assert_eq!(field.0, 6), _ => unreachable!() }
-        match &f2_m.ops[2] { Opcode::DynSet { field, .. } => assert_eq!(field.0, 1), _ => unreachable!() }
+        match &f2_m.ops[0] {
+            Opcode::String { ptr, .. } => assert_eq!(ptr.0, 9),
+            _ => unreachable!(),
+        }
+        match &f2_m.ops[1] {
+            Opcode::DynGet { field, .. } => assert_eq!(field.0, 6),
+            _ => unreachable!(),
+        }
+        match &f2_m.ops[2] {
+            Opcode::DynSet { field, .. } => assert_eq!(field.0, 1),
+            _ => unreachable!(),
+        }
 
         // RefString(0) is preserved for names
         assert_eq!(f2_m.name.0, 0);
@@ -945,7 +1210,7 @@ mod tests {
 
     #[test]
     fn test_merge_bytes_pool_offsets_and_ptr_adjustment() {
-        use crate::types::{Function, Reg, RefBytes, RefFun, RefString, RefType};
+        use crate::types::{Function, RefBytes, RefFun, RefString, RefType, Reg};
 
         // Bytecode 1: raw bytes [1,2,3], offsets [0,1]
         // This yields entries: [1] and [2,3]
@@ -955,7 +1220,10 @@ mod tests {
             t: RefType(0),
             findex: RefFun(0),
             regs: vec![],
-            ops: vec![Opcode::Bytes { dst: Reg(0), ptr: RefBytes(0) }],
+            ops: vec![Opcode::Bytes {
+                dst: Reg(0),
+                ptr: RefBytes(0),
+            }],
             debug_info: None,
             assigns: None,
             name: RefString(0),
@@ -970,7 +1238,10 @@ mod tests {
             t: RefType(0),
             findex: RefFun(0),
             regs: vec![],
-            ops: vec![Opcode::Bytes { dst: Reg(0), ptr: RefBytes(1) }],
+            ops: vec![Opcode::Bytes {
+                dst: Reg(0),
+                ptr: RefBytes(1),
+            }],
             debug_info: None,
             assigns: None,
             name: RefString(0),
@@ -979,7 +1250,10 @@ mod tests {
 
         // Merge: bytes pool raw should concatenate; second pool offsets shifted by original_len of first raw
         let merged = bc1.merge_with(bc2).unwrap();
-        let (buf, pos) = merged.bytes.as_ref().expect("merged bytes pool should exist");
+        let (buf, pos) = merged
+            .bytes
+            .as_ref()
+            .expect("merged bytes pool should exist");
 
         // Verify concatenated raw bytes and shifted offsets
         assert_eq!(buf.as_slice(), &[1u8, 2, 3, 9, 8, 7, 6]);
@@ -988,7 +1262,11 @@ mod tests {
         // Helper to resolve a RefBytes index to the corresponding slice
         let slice_for = |i: usize| {
             let start = pos[i];
-            let end = if i + 1 < pos.len() { pos[i + 1] } else { buf.len() };
+            let end = if i + 1 < pos.len() {
+                pos[i + 1]
+            } else {
+                buf.len()
+            };
             &buf[start..end]
         };
 
@@ -1014,7 +1292,9 @@ mod tests {
 
     #[test]
     fn test_merge_field_index_remap_in_opcodes_and_prefetch() {
-        use crate::types::{Type, TypeObj, ObjField, RefField, Reg, RefFun, RefString, RefType, InlineInt};
+        use crate::types::{
+            InlineInt, ObjField, RefField, RefFun, RefString, RefType, Reg, Type, TypeObj,
+        };
         use std::collections::HashMap;
         // bc1: type T with flattened fields [p1, a1]
         let mut bc1 = Bytecode::default();
@@ -1028,12 +1308,21 @@ mod tests {
             name: RefString(1),
             super_: None,
             global: RefGlobal(0),
-            own_fields: vec![ObjField { name: RefString(3), t: RefType(0) }],
+            own_fields: vec![ObjField {
+                name: RefString(3),
+                t: RefType(0),
+            }],
             protos: vec![],
             bindings: HashMap::new(),
             fields: vec![
-                ObjField { name: RefString(2), t: RefType(0) }, // p1
-                ObjField { name: RefString(3), t: RefType(0) }, // a1
+                ObjField {
+                    name: RefString(2),
+                    t: RefType(0),
+                }, // p1
+                ObjField {
+                    name: RefString(3),
+                    t: RefType(0),
+                }, // a1
             ],
         }));
         // dummy function to place bc2 function at merged index 1
@@ -1059,18 +1348,36 @@ mod tests {
             name: RefString(1),
             super_: None,
             global: RefGlobal(0),
-            own_fields: vec![ObjField { name: RefString(2), t: RefType(0) }],
+            own_fields: vec![ObjField {
+                name: RefString(2),
+                t: RefType(0),
+            }],
             protos: vec![],
             bindings: HashMap::new(),
-            fields: vec![ObjField { name: RefString(2), t: RefType(0) }],
+            fields: vec![ObjField {
+                name: RefString(2),
+                t: RefType(0),
+            }],
         }));
         bc2.functions.push(Function {
             t: RefType(0),
             findex: RefFun(0),
             regs: vec![RefType(0)], // reg0 is T
             ops: vec![
-                Opcode::GetThis { dst: Reg(1), field: RefField(0) },
-                Opcode::Prefetch { value: Reg(1), field: RefField(0), mode: 0 },
+                Opcode::GetThis {
+                    dst: Reg(1),
+                    field: RefField(0),
+                },
+                Opcode::Prefetch {
+                    value: Reg(1),
+                    field: RefField(0),
+                    mode: 0,
+                },
+                Opcode::Prefetch {
+                    value: Reg(0),
+                    field: RefField(1),
+                    mode: 0,
+                },
             ],
             debug_info: None,
             assigns: None,
@@ -1080,13 +1387,23 @@ mod tests {
 
         let merged = bc1.merge_with(bc2).expect("merge_with should succeed");
         let f_merged = &merged.functions[1];
-        match &f_merged.ops[0] { Opcode::GetThis { field, .. } => assert_eq!(field.0, 1), _ => panic!("expected GetThis") }
-        match &f_merged.ops[1] { Opcode::Prefetch { field, .. } => assert_eq!(field.0, 1), _ => panic!("expected Prefetch") }
+        match &f_merged.ops[0] {
+            Opcode::GetThis { field, .. } => assert_eq!(field.0, 1),
+            _ => panic!("expected GetThis"),
+        }
+        match &f_merged.ops[1] {
+            Opcode::Prefetch { field, .. } => assert_eq!(field.0, 0),
+            _ => panic!("expected Prefetch"),
+        }
+        match &f_merged.ops[2] {
+            Opcode::Prefetch { field, .. } => assert_eq!(field.0, 2),
+            _ => panic!("expected Prefetch"),
+        }
     }
 
     #[test]
     fn test_adjust_references_remaps_typeobj_bindings_fields() {
-        use crate::types::{TypeObj, ObjField, RefField, RefFun, RefString, RefType};
+        use crate::types::{ObjField, RefField, RefFun, RefString, RefType, TypeObj};
         use std::collections::HashMap;
         // Build TypeObj with two fields and a binding for field 0
         let mut obj = TypeObj {
@@ -1094,8 +1411,14 @@ mod tests {
             super_: None,
             global: RefGlobal(0),
             own_fields: vec![
-                ObjField { name: RefString(2), t: RefType(0) },
-                ObjField { name: RefString(3), t: RefType(0) },
+                ObjField {
+                    name: RefString(2),
+                    t: RefType(0),
+                },
+                ObjField {
+                    name: RefString(3),
+                    t: RefType(0),
+                },
             ],
             protos: vec![],
             bindings: {
@@ -1104,8 +1427,14 @@ mod tests {
                 m
             },
             fields: vec![
-                ObjField { name: RefString(2), t: RefType(0) },
-                ObjField { name: RefString(3), t: RefType(0) },
+                ObjField {
+                    name: RefString(2),
+                    t: RefType(0),
+                },
+                ObjField {
+                    name: RefString(3),
+                    t: RefType(0),
+                },
             ],
         };
         // Prepare a mapping that remaps field 0 -> 1 and shifts functions by +5
@@ -1117,7 +1446,8 @@ mod tests {
         assert_eq!(obj.bindings.get(&RefField(1)).unwrap().0, 15);
         assert!(!obj.bindings.contains_key(&RefField(0)));
     }
-}/// Index reference to either a function or a native.
+}
+/// Index reference to either a function or a native.
 #[derive(Debug, Copy, Clone)]
 enum RefFunKnown {
     Fun(usize),
@@ -1237,209 +1567,247 @@ impl Index<RefGlobal> for Bytecode {
 
 //endregion
 
+#[test]
+fn test_merge_cross_bytecode_calls_and_ref_resolution() {
+    use crate::opcodes::Opcode;
+    use crate::types::Reg;
+    use crate::types::{
+        Native, ObjField, ObjProto, RefBytes, RefFun, RefGlobal, RefString, RefType, Type, TypeObj,
+    };
+    use std::collections::HashMap;
 
-    #[test]
-    fn test_merge_cross_bytecode_calls_and_ref_resolution() {
-        use std::collections::HashMap;
-        use crate::opcodes::Opcode;
-        use crate::types::{Native, ObjField, ObjProto, RefBytes, RefFun, RefGlobal, RefString, RefType, Type, TypeObj};
-        use crate::types::Reg;
-
-        // Build Bytecode 1
-        let mut bc1 = Bytecode::default();
-        bc1.strings = vec![
-            "",                 // 0 (often empty sentinel)
-            "Common",           // 1
-            "T1",               // 2
-            "fieldX",           // 3
-            "f1",               // 4
-        ]
-        .into_iter()
-        .map(Str::from)
-        .collect();
-        bc1.bytes = Some((vec![1u8, 2, 3], vec![0usize, 2usize]));
-        bc1.debug_files = Some(vec![Str::from("b1.hl")]);
-        bc1.globals.push(RefType(0));
-        bc1.types.push(Type::Obj(TypeObj {
-            name: RefString(2),
-            super_: None,
-            global: RefGlobal(0),
-            own_fields: vec![ObjField { name: RefString(3), t: RefType(0) }],
-            fields: vec![],
-            protos: vec![],
-            bindings: HashMap::new(),
-        }));
-
-        // f1 in bc1
-        let f1_findex = RefFun(10);
-        bc1.functions.push(Function {
+    // Build Bytecode 1
+    let mut bc1 = Bytecode::default();
+    bc1.strings = vec![
+        "",       // 0 (often empty sentinel)
+        "Common", // 1
+        "T1",     // 2
+        "fieldX", // 3
+        "f1",     // 4
+    ]
+    .into_iter()
+    .map(Str::from)
+    .collect();
+    bc1.bytes = Some((vec![1u8, 2, 3], vec![0usize, 2usize]));
+    bc1.debug_files = Some(vec![Str::from("b1.hl")]);
+    bc1.globals.push(RefType(0));
+    bc1.types.push(Type::Obj(TypeObj {
+        name: RefString(2),
+        super_: None,
+        global: RefGlobal(0),
+        own_fields: vec![ObjField {
+            name: RefString(3),
             t: RefType(0),
-            findex: f1_findex,
-            regs: vec![],
-            ops: vec![
-                Opcode::String { dst: Reg(0), ptr: RefString(1) }, // "Common"
-                Opcode::GetGlobal { dst: Reg(1), global: RefGlobal(0) },
-                Opcode::Bytes { dst: Reg(2), ptr: RefBytes(0) },
-            ],
-            debug_info: Some(vec![(0, 1), (0, 2)]),
-            assigns: None,
-            name: RefString(4), // "f1"
-            parent: None,
-        });
+        }],
+        fields: vec![],
+        protos: vec![],
+        bindings: HashMap::new(),
+    }));
 
-        // Build Bytecode 2
-        let mut bc2 = Bytecode::default();
-        bc2.strings = vec![
-            "",                 // 0
-            "Common",           // 1 (overlaps with bc1)
-            "T2",               // 2
-            "fieldY",           // 3
-            "f2",               // 4
-            "native_lib",       // 5
-        ]
-        .into_iter()
-        .map(Str::from)
-        .collect();
-        bc2.bytes = Some((vec![9u8, 8, 7, 6], vec![0usize, 2usize, 3usize]));
-        bc2.debug_files = Some(vec![Str::from("b2a.hl"), Str::from("b2b.hl")]);
-        bc2.globals.push(RefType(0));
-        bc2.globals.push(RefType(0));
+    // f1 in bc1
+    let f1_findex = RefFun(10);
+    bc1.functions.push(Function {
+        t: RefType(0),
+        findex: f1_findex,
+        regs: vec![],
+        ops: vec![
+            Opcode::String {
+                dst: Reg(0),
+                ptr: RefString(1),
+            }, // "Common"
+            Opcode::GetGlobal {
+                dst: Reg(1),
+                global: RefGlobal(0),
+            },
+            Opcode::Bytes {
+                dst: Reg(2),
+                ptr: RefBytes(0),
+            },
+        ],
+        debug_info: Some(vec![(0, 1), (0, 2)]),
+        assigns: None,
+        name: RefString(4), // "f1"
+        parent: None,
+    });
 
-        // Native with explicit findex to test native resolution
-        bc2.natives.push(Native {
+    // Build Bytecode 2
+    let mut bc2 = Bytecode::default();
+    bc2.strings = vec![
+        "",           // 0
+        "Common",     // 1 (overlaps with bc1)
+        "T2",         // 2
+        "fieldY",     // 3
+        "f2",         // 4
+        "native_lib", // 5
+    ]
+    .into_iter()
+    .map(Str::from)
+    .collect();
+    bc2.bytes = Some((vec![9u8, 8, 7, 6], vec![0usize, 2usize, 3usize]));
+    bc2.debug_files = Some(vec![Str::from("b2a.hl"), Str::from("b2b.hl")]);
+    bc2.globals.push(RefType(0));
+    bc2.globals.push(RefType(0));
+
+    // Native with explicit findex to test native resolution
+    bc2.natives.push(Native {
+        t: RefType(0),
+        findex: RefFun(30),
+        lib: RefString(5),
+        name: RefString(4), // name is "f2"
+    });
+
+    // f2 function with findex 20 and references across pools; calls f1 across bytecodes
+    let f2 = Function {
+        t: RefType(0),
+        findex: RefFun(20),
+        regs: vec![],
+        ops: vec![
+            Opcode::String {
+                dst: Reg(0),
+                ptr: RefString(1),
+            }, // "Common"
+            Opcode::GetGlobal {
+                dst: Reg(1),
+                global: RefGlobal(1),
+            }, // will shift by bc1.globals.len()
+            Opcode::Bytes {
+                dst: Reg(2),
+                ptr: RefBytes(2),
+            }, // last entry in bc2 bytes -> should adjust
+            Opcode::Type {
+                dst: Reg(3),
+                ty: RefType(0),
+            }, // type will adjust by type_offset
+            Opcode::Call0 {
+                dst: Reg(4),
+                fun: RefFun(f1_findex.0 - 1),
+            }, // after adjust -> 10
+            Opcode::StaticClosure {
+                dst: Reg(5),
+                fun: RefFun(30),
+            }, // native test
+        ],
+        debug_info: Some(vec![(1, 11), (0, 12)]),
+        assigns: None,
+        name: RefString(4), // "f2"
+        parent: None,
+    };
+    bc2.functions.push(f2);
+
+    // bc2 TypeObj with a proto pointing to f2 (RefFun(20))
+    bc2.types.push(Type::Obj(TypeObj {
+        name: RefString(2), // "T2"
+        super_: None,
+        global: RefGlobal(1), // second global in bc2
+        own_fields: vec![ObjField {
+            name: RefString(3),
             t: RefType(0),
-            findex: RefFun(30),
-            lib: RefString(5),
-            name: RefString(4), // name is "f2"
-        });
-
-        // f2 function with findex 20 and references across pools; calls f1 across bytecodes
-        let f2 = Function {
-            t: RefType(0),
+        }],
+        fields: vec![],
+        protos: vec![ObjProto {
+            name: RefString(4),
             findex: RefFun(20),
-            regs: vec![],
-            ops: vec![
-                Opcode::String { dst: Reg(0), ptr: RefString(1) }, // "Common"
-                Opcode::GetGlobal { dst: Reg(1), global: RefGlobal(1) }, // will shift by bc1.globals.len()
-                Opcode::Bytes { dst: Reg(2), ptr: RefBytes(2) }, // last entry in bc2 bytes -> should adjust
-                Opcode::Type { dst: Reg(3), ty: RefType(0) }, // type will adjust by type_offset
-                Opcode::Call0 { dst: Reg(4), fun: RefFun(f1_findex.0 - 1) }, // after adjust -> 10
-                Opcode::StaticClosure { dst: Reg(5), fun: RefFun(30) }, // native test
-            ],
-            debug_info: Some(vec![(1, 11), (0, 12)]),
-            assigns: None,
-            name: RefString(4), // "f2"
-            parent: None,
-        };
-        bc2.functions.push(f2);
+            pindex: 0,
+        }],
+        bindings: HashMap::new(),
+    }));
 
-        // bc2 TypeObj with a proto pointing to f2 (RefFun(20))
-        bc2.types.push(Type::Obj(TypeObj {
-            name: RefString(2), // "T2"
-            super_: None,
-            global: RefGlobal(1), // second global in bc2
-            own_fields: vec![ObjField { name: RefString(3), t: RefType(0) }],
-            fields: vec![],
-            protos: vec![ObjProto { name: RefString(4), findex: RefFun(20), pindex: 0 }],
-            bindings: HashMap::new(),
-        }));
+    // Merge
+    let merged = bc1.merge_with(bc2).expect("merge_with should succeed");
 
-        // Merge
-        let merged = bc1.merge_with(bc2).expect("merge_with should succeed");
-
-        // Assert RefFun resolution for f1
-        match merged.safe_get_ref_fun(f1_findex) {
-            Some(FunPtr::Fun(fun)) => assert_eq!(merged.get(fun.name), "f1"),
-            _ => panic!("f1 should resolve to Function"),
-        }
-        // Assert RefFun resolution for f2 (post-merge findex = 20 + bc1.functions.len())
-        let f2_final_findex_after_merge = 20 + 1; // bc1.functions.len() == 1
-        match merged.safe_get_ref_fun(RefFun(f2_final_findex_after_merge)) {
-            Some(FunPtr::Fun(fun)) => assert_eq!(merged.get(fun.name), "f2"),
-            _ => panic!("f2 should resolve to Function"),
-        }
-        // Assert native resolution (native findex 30 + offset of bc1.functions.len() = 1)
-        let native_findex_after = 30 + 1;
-        match merged.safe_get_ref_fun(RefFun(native_findex_after)) {
-            Some(FunPtr::Native(n)) => assert_eq!(merged.get(n.name), "f2"),
-            _ => panic!("native should resolve to Native"),
-        }
-
-        // Retrieve merged functions by name
-        let f1_merged = merged
-            .functions
-            .iter()
-            .find(|f| merged.get(f.name) == "f1")
-            .expect("merged should contain f1");
-        let f2_merged = merged
-            .functions
-            .iter()
-            .find(|f| merged.get(f.name) == "f2")
-            .expect("merged should contain f2");
-
-        // f1: Check GetGlobal and Bytes
-        match &f1_merged.ops[1] {
-            Opcode::GetGlobal { global, .. } => assert_eq!(global.0, 0),
-            _ => panic!("expected GetGlobal in f1"),
-        }
-        match &f1_merged.ops[2] {
-            Opcode::Bytes { ptr, .. } => assert_eq!(ptr.0, 0),
-            _ => panic!("expected Bytes in f1"),
-        }
-
-        // f2: GetGlobal adjusted by bc1.globals.len() = 1 -> 2 in merged
-        match &f2_merged.ops[1] {
-            Opcode::GetGlobal { global, .. } => assert_eq!(global.0, 2),
-            _ => panic!("expected GetGlobal in f2"),
-        }
-        // f2: Bytes ptr adjusted by bytes_offset = len(bc1 bytes offsets)=2; original 2 -> merged 4
-        match &f2_merged.ops[2] {
-            Opcode::Bytes { ptr, .. } => assert_eq!(ptr.0, 4),
-            _ => panic!("expected Bytes in f2"),
-        }
-        // f2: Type operand adjusted by type_offset = bc1.types.len() = 1
-        match &f2_merged.ops[3] {
-            Opcode::Type { ty, .. } => assert_eq!(ty.0, 1),
-            _ => panic!("expected Type in f2"),
-        }
-        // f2: Call0 to f1 adjusted by function_offset: original (10 - 1) -> merged 10
-        match &f2_merged.ops[4] {
-            Opcode::Call0 { fun, .. } => assert_eq!(fun.0, 10),
-            _ => panic!("expected Call0 to f1 in f2"),
-        }
-        // f2: StaticClosure to native findex 30 + offset
-        match &f2_merged.ops[5] {
-            Opcode::StaticClosure { fun, .. } => assert_eq!(fun.0, native_findex_after),
-            _ => panic!("expected StaticClosure to native in f2"),
-        }
-
-        // Debug info indices adjusted for f2 by debug_file_offset = bc1.debug_files.len() = 1
-        let dbg2 = f2_merged.debug_info.as_ref().expect("f2 has debug info");
-        assert_eq!(dbg2[0].0, 2); // original 1 + offset 1
-        assert_eq!(dbg2[1].0, 1); // original 0 + offset 1
-
-        // String dedup: "Common" should appear once and both ops reference same index
-        let common_idx = merged
-            .strings
-            .iter()
-            .position(|s| s == "Common")
-            .expect("Common string present");
-        match &f1_merged.ops[0] {
-            Opcode::String { ptr, .. } => assert_eq!(ptr.0, common_idx),
-            _ => panic!("expected String 'Common' in f1"),
-        }
-        match &f2_merged.ops[0] {
-            Opcode::String { ptr, .. } => assert_eq!(ptr.0, common_idx),
-            _ => panic!("expected String 'Common' in f2"),
-        }
-
-        // Type/global/proto adjustments: verify bc2's TypeObj in merged
-        match &merged.types[1] {
-            Type::Obj(obj) => {
-                assert_eq!(merged.get(obj.name), "T2");
-                assert_eq!(obj.global.0, 2); // original 1 + global_offset 1
-                assert_eq!(obj.protos[0].findex.0, f2_final_findex_after_merge);
-            }
-            _ => panic!("expected Type::Obj for bc2"),
-        }
+    // Assert RefFun resolution for f1
+    match merged.safe_get_ref_fun(f1_findex) {
+        Some(FunPtr::Fun(fun)) => assert_eq!(merged.get(fun.name), "f1"),
+        _ => panic!("f1 should resolve to Function"),
     }
+    // Assert RefFun resolution for f2 (post-merge findex = 20 + bc1.functions.len())
+    let f2_final_findex_after_merge = 20 + 1; // bc1.functions.len() == 1
+    match merged.safe_get_ref_fun(RefFun(f2_final_findex_after_merge)) {
+        Some(FunPtr::Fun(fun)) => assert_eq!(merged.get(fun.name), "f2"),
+        _ => panic!("f2 should resolve to Function"),
+    }
+    // Assert native resolution (native findex 30 + offset of bc1.functions.len() = 1)
+    let native_findex_after = 30 + 1;
+    match merged.safe_get_ref_fun(RefFun(native_findex_after)) {
+        Some(FunPtr::Native(n)) => assert_eq!(merged.get(n.name), "f2"),
+        _ => panic!("native should resolve to Native"),
+    }
+
+    // Retrieve merged functions by name
+    let f1_merged = merged
+        .functions
+        .iter()
+        .find(|f| merged.get(f.name) == "f1")
+        .expect("merged should contain f1");
+    let f2_merged = merged
+        .functions
+        .iter()
+        .find(|f| merged.get(f.name) == "f2")
+        .expect("merged should contain f2");
+
+    // f1: Check GetGlobal and Bytes
+    match &f1_merged.ops[1] {
+        Opcode::GetGlobal { global, .. } => assert_eq!(global.0, 0),
+        _ => panic!("expected GetGlobal in f1"),
+    }
+    match &f1_merged.ops[2] {
+        Opcode::Bytes { ptr, .. } => assert_eq!(ptr.0, 0),
+        _ => panic!("expected Bytes in f1"),
+    }
+
+    // f2: GetGlobal adjusted by bc1.globals.len() = 1 -> 2 in merged
+    match &f2_merged.ops[1] {
+        Opcode::GetGlobal { global, .. } => assert_eq!(global.0, 2),
+        _ => panic!("expected GetGlobal in f2"),
+    }
+    // f2: Bytes ptr adjusted by bytes_offset = len(bc1 bytes offsets)=2; original 2 -> merged 4
+    match &f2_merged.ops[2] {
+        Opcode::Bytes { ptr, .. } => assert_eq!(ptr.0, 4),
+        _ => panic!("expected Bytes in f2"),
+    }
+    // f2: Type operand adjusted by type_offset = bc1.types.len() = 1
+    match &f2_merged.ops[3] {
+        Opcode::Type { ty, .. } => assert_eq!(ty.0, 1),
+        _ => panic!("expected Type in f2"),
+    }
+    // f2: Call0 to f1 adjusted by function_offset: original (10 - 1) -> merged 10
+    match &f2_merged.ops[4] {
+        Opcode::Call0 { fun, .. } => assert_eq!(fun.0, 10),
+        _ => panic!("expected Call0 to f1 in f2"),
+    }
+    // f2: StaticClosure to native findex 30 + offset
+    match &f2_merged.ops[5] {
+        Opcode::StaticClosure { fun, .. } => assert_eq!(fun.0, native_findex_after),
+        _ => panic!("expected StaticClosure to native in f2"),
+    }
+
+    // Debug info indices adjusted for f2 by debug_file_offset = bc1.debug_files.len() = 1
+    let dbg2 = f2_merged.debug_info.as_ref().expect("f2 has debug info");
+    assert_eq!(dbg2[0].0, 2); // original 1 + offset 1
+    assert_eq!(dbg2[1].0, 1); // original 0 + offset 1
+
+    // String dedup: "Common" should appear once and both ops reference same index
+    let common_idx = merged
+        .strings
+        .iter()
+        .position(|s| s == "Common")
+        .expect("Common string present");
+    match &f1_merged.ops[0] {
+        Opcode::String { ptr, .. } => assert_eq!(ptr.0, common_idx),
+        _ => panic!("expected String 'Common' in f1"),
+    }
+    match &f2_merged.ops[0] {
+        Opcode::String { ptr, .. } => assert_eq!(ptr.0, common_idx),
+        _ => panic!("expected String 'Common' in f2"),
+    }
+
+    // Type/global/proto adjustments: verify bc2's TypeObj in merged
+    match &merged.types[1] {
+        Type::Obj(obj) => {
+            assert_eq!(merged.get(obj.name), "T2");
+            assert_eq!(obj.global.0, 2); // original 1 + global_offset 1
+            assert_eq!(obj.protos[0].findex.0, f2_final_findex_after_merge);
+        }
+        _ => panic!("expected Type::Obj for bc2"),
+    }
+}

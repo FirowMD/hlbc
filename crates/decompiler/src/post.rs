@@ -1,11 +1,11 @@
 use hlbc::Bytecode;
 
-use crate::ast::{add, ConstructorCall, Expr, Operation, Statement};
+use crate::ast::{add, ConstructorCall, Expr, Operation, RuntimeCheck, StateTerminator, Statement};
 use crate::call_fun;
 
 pub(crate) trait AstVisitor {
-    fn visit_stmt(&mut self, code: &Bytecode, stmt: &mut Statement) {}
-    fn visit_expr(&mut self, code: &Bytecode, expr: &mut Expr) {}
+    fn visit_stmt(&mut self, _code: &Bytecode, _stmt: &mut Statement) {}
+    fn visit_expr(&mut self, _code: &Bytecode, _expr: &mut Expr) {}
 }
 
 /// Visit everything depth-first
@@ -38,6 +38,27 @@ pub(crate) fn visit(
             Statement::ExprStatement(e) => {
                 v!(e);
             }
+            Statement::GlobalStore { value, .. } => v!(value),
+            Statement::MemoryStore {
+                bytes,
+                index,
+                value,
+                ..
+            } => {
+                v!(bytes);
+                v!(index);
+                v!(value);
+            }
+            Statement::ReferenceStore {
+                reference, value, ..
+            } => {
+                v!(reference);
+                v!(value);
+            }
+            Statement::RuntimeCheck(RuntimeCheck::Null(value)) => v!(value),
+            Statement::RuntimeCheck(RuntimeCheck::Assert) => {}
+            Statement::Prefetch { value, .. } => v!(value),
+            Statement::Nop => {}
             Statement::Return(opt) => {
                 if let Some(e) = opt {
                     v!(e);
@@ -55,9 +76,12 @@ pub(crate) fn visit(
             } => {
                 v!(arg);
                 rec!(default);
-                cases.iter_mut().for_each(|(_, case)| rec!(case));
+                for (patterns, case) in cases {
+                    patterns.iter_mut().for_each(|pattern| v!(pattern));
+                    rec!(case);
+                }
             }
-            Statement::While { cond, stmts } => {
+            Statement::While { cond, stmts } | Statement::DoWhile { cond, stmts } => {
                 v!(cond);
                 rec!(stmts);
             }
@@ -72,7 +96,39 @@ pub(crate) fn visit(
             Statement::Catch { stmts } => {
                 rec!(stmts);
             }
+            Statement::TryCatch { try_stmts, catches } => {
+                rec!(try_stmts);
+                for catch in catches {
+                    v!(&mut catch.variable);
+                    rec!(&mut catch.stmts);
+                }
+            }
+            Statement::StateMachine { locals, blocks, .. } => {
+                for local in locals {
+                    v!(local);
+                }
+                for block in blocks {
+                    rec!(&mut block.stmts);
+                    match &mut block.terminator {
+                        StateTerminator::Branch { cond, .. } => v!(cond),
+                        StateTerminator::Switch { arg, .. } => v!(arg),
+                        StateTerminator::Return(Some(value)) | StateTerminator::Throw(value) => {
+                            v!(value)
+                        }
+                        StateTerminator::Goto(_)
+                        | StateTerminator::Return(None)
+                        | StateTerminator::Exit => {}
+                    }
+                    if let Some(exception) = &mut block.exception {
+                        v!(&mut exception.variable);
+                    }
+                }
+            }
             Statement::Comment(_) => {}
+            Statement::UnhandledOpcode { .. } => {}
+            Statement::Provenanced { statement, .. } => {
+                visit(code, std::slice::from_mut(statement), visitors);
+            }
         }
         for visitor in visitors.iter_mut() {
             visitor.visit_stmt(code, stmt);
@@ -105,6 +161,7 @@ pub(crate) fn visit_expr(code: &Bytecode, expr: &mut Expr, visitors: &mut [Box<d
             rec!(arr);
             rec!(index);
         }
+        Expr::Bytes(_) => {}
         Expr::Call(call) => {
             rec!(&mut call.fun);
             for arg in call.args.iter_mut() {
@@ -124,10 +181,28 @@ pub(crate) fn visit_expr(code: &Bytecode, expr: &mut Expr, visitors: &mut [Box<d
                 rec!(arg);
             }
         }
+        Expr::EnumIndex(value) => rec!(value),
+        Expr::EnumPattern(_, _, _) => {}
         Expr::Field(obj, _) => {
             rec!(obj);
         }
         Expr::FunRef(_) => {}
+        Expr::MemoryLoad { bytes, index, .. } => {
+            rec!(bytes);
+            rec!(index);
+        }
+        Expr::TypeValue { .. } => {}
+        Expr::RuntimeType { value, .. } | Expr::TypeId { value, .. } => rec!(value),
+        Expr::VirtualClosure { receiver, .. } => rec!(receiver),
+        Expr::Reference { value, .. } => rec!(value),
+        Expr::Dereference { reference, .. } => rec!(reference),
+        Expr::ReferenceData { array, .. } => rec!(array),
+        Expr::ReferenceOffset {
+            reference, offset, ..
+        } => {
+            rec!(reference);
+            rec!(offset);
+        }
         Expr::IfElse { cond, if_, else_ } => {
             rec!(cond);
             v!(if_);
@@ -213,6 +288,7 @@ pub(crate) fn visit_expr(code: &Bytecode, expr: &mut Expr, visitors: &mut [Box<d
         },
         Expr::Unknown(_) => {}
         Expr::Variable(_, _) => {}
+        Expr::Provenanced { expression, .. } => rec!(expression),
     }
     for visitor in visitors.iter_mut() {
         visitor.visit_expr(code, expr);
@@ -277,8 +353,12 @@ impl AstVisitor for IfExpressions {
         };
 
         if let Some((decl, var, cond, if_assign, else_assign, mut if_stmts, mut else_stmts)) = opt {
-            *if_stmts.last_mut().unwrap() = Statement::ExprStatement(if_assign);
-            *else_stmts.last_mut().unwrap() = Statement::ExprStatement(else_assign);
+            let (Some(last_if), Some(last_else)) = (if_stmts.last_mut(), else_stmts.last_mut())
+            else {
+                return;
+            };
+            *last_if = Statement::ExprStatement(if_assign);
+            *last_else = Statement::ExprStatement(else_assign);
             *stmt = Statement::Assign {
                 declaration: decl,
                 variable: var,
@@ -333,9 +413,9 @@ impl AstVisitor for Itos {
     fn visit_expr(&mut self, code: &Bytecode, expr: &mut Expr) {
         let var = match expr {
             Expr::Call(call) => match call.fun {
-                Expr::FunRef(fun) if fun.name(code) == "__alloc__" => match &call.args[0] {
-                    Expr::Call(call) => match call.fun {
-                        Expr::FunRef(fun) if fun.name(code) == "itos" => Some(call.args[0].clone()),
+                Expr::FunRef(fun) if fun.name(code) == "__alloc__" => match call.args.first() {
+                    Some(Expr::Call(call)) => match call.fun {
+                        Expr::FunRef(fun) if fun.name(code) == "itos" => call.args.first().cloned(),
                         _ => None,
                     },
                     _ => None,
@@ -361,8 +441,12 @@ impl AstVisitor for Trace {
                 Expr::Field(obj, field) => match obj.as_ref() {
                     Expr::Variable(_, _) => {
                         if field == "trace" {
-                            let trace = code.function_by_name(field).unwrap();
-                            Some(call_fun(trace.findex, vec![call.args[0].clone()]))
+                            code.function_by_name(field).and_then(|trace| {
+                                call.args
+                                    .first()
+                                    .cloned()
+                                    .map(|argument| call_fun(trace.findex, vec![argument]))
+                            })
                         } else {
                             None
                         }

@@ -8,7 +8,7 @@ use std::ops::Index;
 use crate::opcodes::Opcode;
 use crate::types::{
     EnumConstruct, FunPtr, Function, ObjField, ObjProto, RefEnumConstruct, RefField, RefFun,
-    RefGlobal, RefString, RefType, Reg, Type, TypeFun, TypeObj,
+    RefString, RefType, Reg, Type, TypeFun, TypeObj,
 };
 use crate::Bytecode;
 
@@ -248,16 +248,16 @@ pub fn usage_report(code: &Bytecode) -> FullUsageReport {
 /// Find all functions that reference a specific type
 pub fn find_functions_using_type(code: &Bytecode, target_type: RefType) -> Vec<RefFun> {
     let mut results = Vec::new();
-    
+
     for func in code.functions() {
         let mut uses_type = false;
-        
+
         match func {
             FunPtr::Fun(f) => {
                 if f.t == target_type {
                     uses_type = true;
                 }
-                
+
                 if !uses_type {
                     if let Some(fun_type) = f.t.as_fun(code) {
                         if fun_type.args.contains(&target_type) || fun_type.ret == target_type {
@@ -265,11 +265,11 @@ pub fn find_functions_using_type(code: &Bytecode, target_type: RefType) -> Vec<R
                         }
                     }
                 }
-                
+
                 if !uses_type && f.regs.contains(&target_type) {
                     uses_type = true;
                 }
-                
+
                 if !uses_type {
                     for op in &f.ops {
                         match op {
@@ -295,7 +295,9 @@ pub fn find_functions_using_type(code: &Bytecode, target_type: RefType) -> Vec<R
                                         break;
                                     }
                                     if let Some(fun_type) = fn_type.as_fun(code) {
-                                        if fun_type.args.contains(&target_type) || fun_type.ret == target_type {
+                                        if fun_type.args.contains(&target_type)
+                                            || fun_type.ret == target_type
+                                        {
                                             uses_type = true;
                                             break;
                                         }
@@ -325,7 +327,9 @@ pub fn find_functions_using_type(code: &Bytecode, target_type: RefType) -> Vec<R
                                 }
                             }
                             Opcode::GetGlobal { global, .. } | Opcode::SetGlobal { global, .. } => {
-                                if global.0 < code.globals.len() && code.globals[global.0] == target_type {
+                                if global.0 < code.globals.len()
+                                    && code.globals[global.0] == target_type
+                                {
                                     uses_type = true;
                                     break;
                                 }
@@ -334,7 +338,7 @@ pub fn find_functions_using_type(code: &Bytecode, target_type: RefType) -> Vec<R
                         }
                     }
                 }
-                
+
                 if uses_type {
                     results.push(f.findex);
                 }
@@ -350,7 +354,7 @@ pub fn find_functions_using_type(code: &Bytecode, target_type: RefType) -> Vec<R
             }
         }
     }
-    
+
     results.sort_unstable_by_key(|f| f.0);
     results.dedup();
     results
@@ -359,19 +363,19 @@ pub fn find_functions_using_type(code: &Bytecode, target_type: RefType) -> Vec<R
 /// Find all types that are referenced by a specific function
 pub fn find_types_used_by_function(code: &Bytecode, fun_index: RefFun) -> Vec<RefType> {
     let mut types = Vec::new();
-    
+
     if let Some(func_ptr) = code.safe_get_ref_fun(fun_index) {
         match func_ptr {
             FunPtr::Fun(f) => {
                 types.push(f.t);
-                
+
                 if let Some(fun_type) = f.t.as_fun(code) {
                     types.extend(&fun_type.args);
                     types.push(fun_type.ret);
                 }
-                
+
                 types.extend(&f.regs);
-                
+
                 for op in &f.ops {
                     match op {
                         Opcode::Type { ty, .. } => {
@@ -443,7 +447,7 @@ pub fn find_types_used_by_function(code: &Bytecode, fun_index: RefFun) -> Vec<Re
             }
             FunPtr::Native(n) => {
                 types.push(n.t);
-                
+
                 if let Some(fun_type) = n.t.as_fun(code) {
                     types.extend(&fun_type.args);
                     types.push(fun_type.ret);
@@ -451,7 +455,7 @@ pub fn find_types_used_by_function(code: &Bytecode, fun_index: RefFun) -> Vec<Re
             }
         }
     }
-    
+
     types.sort_unstable_by_key(|t| t.0);
     types.dedup();
     types

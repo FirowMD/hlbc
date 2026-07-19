@@ -958,20 +958,10 @@ mod test {
     }
 
     #[test]
-    fn fmt_wartales() {
-        let path = "E:\\Games\\Wartales\\hlboot.dat";
-        if !Path::new(path).is_file() {
+    fn fmt_optional_stress_input() {
+        let Some(path) = std::env::var_os("HLBC_HLBOOT") else {
             return;
-        }
-        test_fmt(path);
-    }
-
-    #[test]
-    fn fmt_northgard() {
-        let path = "../../data/northgard.hl";
-        if !Path::new(path).is_file() {
-            return;
-        }
+        };
         test_fmt(path);
     }
 }

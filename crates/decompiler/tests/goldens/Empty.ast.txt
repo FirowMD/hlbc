@@ -1,0 +1,15 @@
+Class {
+    name: "Empty",
+    parent: None,
+    fields: [],
+    methods: [
+        Method {
+            fun: RefFun(
+                22,
+            ),
+            static_: true,
+            dynamic: false,
+            statements: [],
+        },
+    ],
+}

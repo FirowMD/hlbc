@@ -1,0 +1,38 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  milestone-foundations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: krdlab/setup-haxe@v1
+        with:
+          haxe-version: 4.3.7
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Compile every Haxe fixture
+        run: sh scripts/compile-fixtures.sh
+
+      - name: Test workspace, CFG verification, and panic properties
+        run: cargo test --workspace --all-targets
+
+      - name: Run milestone gate and write JSON report
+        run: cargo run -p hlbc-decompiler --bin hlbc-milestone -- --no-execute --report target/milestone-report.json
+
+      - name: Upload deterministic milestone report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: milestone-report
+          path: target/milestone-report.json

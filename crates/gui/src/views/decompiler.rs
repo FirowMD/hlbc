@@ -34,14 +34,25 @@ impl AppView for DecompilerView {
 
             self.output = match ctx.selected() {
                 Item::Fun(fun) => match code.get(fun) {
-                    FunPtr::Fun(func) => decompile_function(code, func)
-                        .display(code, &FormatOptions::new(2))
-                        .to_string(),
+                    FunPtr::Fun(func) => match decompile_function(code, func) {
+                        Ok(decompiled) => decompiled
+                            .value
+                            .display(code, &FormatOptions::new(2))
+                            .to_string(),
+                        Err(error) => error.to_string(),
+                    },
                     FunPtr::Native(n) => n.display::<EnhancedFmt>(code).to_string(),
                 },
-                Item::Type(t) => decompile_class(code, t.as_obj(code).unwrap())
-                    .display(code, &FormatOptions::new(2))
-                    .to_string(),
+                Item::Type(t) => match t.as_obj(code) {
+                    Some(object) => match decompile_class(code, object) {
+                        Ok(decompiled) => decompiled
+                            .value
+                            .display(code, &FormatOptions::new(2))
+                            .to_string(),
+                        Err(error) => error.to_string(),
+                    },
+                    None => "Selected type is not an object".to_owned(),
+                },
                 _ => String::new(),
             };
             self.cache_selected = ctx.selected();
