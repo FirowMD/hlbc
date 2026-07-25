@@ -6,7 +6,7 @@ count=0
 for source in "$root"/data/*.hx; do
     test -f "$source" || { echo "No data/*.hx fixtures were found" >&2; exit 1; }
     name=$(basename "$source" .hx)
-    haxe -cp "$root/data" -main "$name" -hl "$root/data/$name.hl"
+    (cd "$root" && haxe -cp data -main "$name" -hl "data/$name.hl")
     count=$((count + 1))
 done
 

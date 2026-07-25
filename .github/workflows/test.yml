@@ -24,8 +24,14 @@ jobs:
       - name: Compile every Haxe fixture
         run: sh scripts/compile-fixtures.sh
 
+      - name: Compile recovered Haxe goldens
+        run: sh scripts/compile-decompiler-goldens.sh
+
       - name: Test workspace, CFG verification, and panic properties
         run: cargo test --workspace --all-targets
+
+      - name: Enforce release interactive-decompilation p95
+        run: cargo test --release -p hlbc-decompiler ordinary_function_release_p95_stays_below_fifty_milliseconds -- --ignored
 
       - name: Run milestone gate and write JSON report
         run: cargo run -p hlbc-decompiler --bin hlbc-milestone -- --no-execute --report target/milestone-report.json

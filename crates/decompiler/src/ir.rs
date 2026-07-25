@@ -8,7 +8,7 @@ use hlbc::types::{Function, RefField, RefGlobal, RefString, RefType, Reg, Type};
 use hlbc::Bytecode;
 use serde::Serialize;
 
-use crate::cfg::{ControlFlowGraph, NodeId};
+use crate::cfg::{ControlFlowGraph, DominatorInfo, NodeId};
 use crate::diagnostics::{DecompileError, Decompiled, Diagnostic, DiagnosticSeverity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -29,6 +29,14 @@ pub struct OpcodeRange {
 impl OpcodeRange {
     pub const fn new(start: usize, end: usize) -> Self {
         Self { start, end }
+    }
+
+    pub const fn len(self) -> usize {
+        self.end.saturating_sub(self.start)
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.start >= self.end
     }
 }
 
@@ -380,6 +388,69 @@ impl TypedIr {
             Err(IrVerificationErrors {
                 errors: verifier.errors,
             })
+        }
+    }
+
+    pub(crate) fn value_dominates_operation(
+        &self,
+        value: ValueId,
+        use_block: usize,
+        use_operation: OperationId,
+        dominators: &DominatorInfo,
+    ) -> bool {
+        let Some(value) = self.values.get(value.0) else {
+            return false;
+        };
+        match value.definition {
+            ValueDefinition::Parameter { .. } | ValueDefinition::Undefined { block: None } => {
+                dominators
+                    .sets
+                    .get(&NodeId::Block(use_block))
+                    .map_or(false, |set| set.contains(&NodeId::Entry))
+            }
+            ValueDefinition::Phi { block, .. }
+            | ValueDefinition::Undefined { block: Some(block) } => {
+                node_dominates(block, use_block, dominators)
+            }
+            ValueDefinition::Operation {
+                block, operation, ..
+            } => {
+                node_dominates(block, use_block, dominators)
+                    && (block != use_block || operation.0 < use_operation.0)
+            }
+        }
+    }
+
+    pub(crate) fn value_dominates_edge(
+        &self,
+        value: ValueId,
+        predecessor: NodeId,
+        dominators: &DominatorInfo,
+    ) -> bool {
+        let Some(value) = self.values.get(value.0) else {
+            return false;
+        };
+        match predecessor {
+            NodeId::Entry => matches!(
+                value.definition,
+                ValueDefinition::Parameter { .. } | ValueDefinition::Undefined { block: None }
+            ),
+            NodeId::Block(predecessor_block) => match value.definition {
+                ValueDefinition::Parameter { .. } | ValueDefinition::Undefined { block: None } => {
+                    dominators
+                        .sets
+                        .get(&predecessor)
+                        .map_or(false, |set| set.contains(&NodeId::Entry))
+                }
+                ValueDefinition::Phi { block, .. }
+                | ValueDefinition::Undefined { block: Some(block) } => {
+                    node_dominates(block, predecessor_block, dominators)
+                }
+                ValueDefinition::Operation { block, .. } => {
+                    node_dominates(block, predecessor_block, dominators)
+                }
+            },
+            NodeId::Exit => false,
         }
     }
 }

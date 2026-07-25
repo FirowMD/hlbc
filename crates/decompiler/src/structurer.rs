@@ -24,10 +24,12 @@ pub(crate) fn structure_function(
     function: &Function,
     cfg: &ControlFlowGraph,
     flat: &FlatOutput,
+    include_unreachable: bool,
 ) -> Result<StructuredOutput, String> {
     let analysis = RegionAnalysis::analyze(cfg);
     if cfg.irreducible_regions.is_empty() {
-        let mut emitter = RegionEmitter::new(code, function, cfg, flat, &analysis);
+        let mut emitter =
+            RegionEmitter::new(code, function, cfg, flat, &analysis, include_unreachable);
         match emitter.emit_root() {
             Ok(statements) => match emitter.covered.verify(cfg) {
                 Ok(()) => {
@@ -79,6 +81,7 @@ struct RegionEmitter<'a> {
     visited: BTreeSet<NodeId>,
     covered: StructuredEdgeSet,
     loop_stack: Vec<NodeId>,
+    include_unreachable: bool,
 }
 
 impl<'a> RegionEmitter<'a> {
@@ -88,6 +91,7 @@ impl<'a> RegionEmitter<'a> {
         cfg: &'a ControlFlowGraph,
         flat: &'a FlatOutput,
         analysis: &RegionAnalysis,
+        include_unreachable: bool,
     ) -> Self {
         let loops = analysis
             .loops()
@@ -116,6 +120,7 @@ impl<'a> RegionEmitter<'a> {
             visited: BTreeSet::new(),
             covered: StructuredEdgeSet::default(),
             loop_stack: Vec::new(),
+            include_unreachable,
         }
     }
 
@@ -128,13 +133,20 @@ impl<'a> RegionEmitter<'a> {
             .ok_or_else(|| "CFG has no entry edge".to_owned())?;
         self.covered.record(entry);
         let mut statements = self.emit_sequence(entry.to, NodeId::Exit, None)?;
-        if self
-            .cfg
-            .blocks
-            .iter()
-            .map(|block| NodeId::Block(block.id))
-            .any(|node| !self.visited.contains(&node))
-        {
+        let reachable = self.cfg.reachable();
+        if !self.include_unreachable {
+            for block in &self.cfg.blocks {
+                let node = NodeId::Block(block.id);
+                if !reachable.contains(&node) {
+                    self.visited.insert(node);
+                    self.covered.record_from(self.cfg, node);
+                }
+            }
+        }
+        if self.cfg.blocks.iter().any(|block| {
+            let node = NodeId::Block(block.id);
+            !self.visited.contains(&node)
+        }) {
             return Err("normal regions do not own every CFG block".to_owned());
         }
         // A void return at the synthetic exit is implicit in Haxe.
@@ -1055,11 +1067,11 @@ fn hoist_declarations(statements: &mut [Statement], locals: &mut BTreeMap<u32, E
             ..
         } = statement
         {
-            if *declaration {
-                if let Expr::Variable(reg, _) = variable {
-                    let register = reg.0;
-                    let variable = variable.clone();
-                    locals.entry(register).or_insert(variable);
+            if let Expr::Variable(reg, _) = variable {
+                let register = reg.0;
+                let variable = variable.clone();
+                locals.entry(register).or_insert(variable);
+                if *declaration {
                     *declaration = false;
                 }
             }

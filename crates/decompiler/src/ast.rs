@@ -17,6 +17,8 @@ pub struct SourceFile {
 
 #[derive(Debug, Clone)]
 pub struct Class {
+    /// HashLink type represented by this declaration, when known.
+    pub ty: Option<RefType>,
     pub name: Str,
     pub parent: Option<Str>,
     pub fields: Vec<ClassField>,
@@ -35,12 +37,15 @@ pub struct Method {
     pub fun: RefFun,
     pub static_: bool,
     pub dynamic: bool,
+    pub constructor: bool,
+    pub override_: bool,
     pub statements: Vec<Statement>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum Constant {
     InlineInt(usize),
+    SignedInt(i64),
     Int(RefInt),
     Float(RefFloat),
     String(RefString),
@@ -134,19 +139,50 @@ impl ConstructorCall {
 pub struct Call {
     pub fun: Expr,
     pub args: Vec<Expr>,
+    pub kind: CallKind,
+    pub return_type: Option<RefType>,
+}
+
+/// The source-level dispatch operation represented by a call opcode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallKind {
+    Static(RefFun),
+    Instance(RefFun),
+    Virtual(RefFun),
+    Dynamic,
+    Closure,
 }
 
 impl Call {
     pub fn new(fun: Expr, args: Vec<Expr>) -> Self {
-        Self { fun, args }
+        Self {
+            fun,
+            args,
+            kind: CallKind::Dynamic,
+            return_type: None,
+        }
     }
 
     pub fn new_fun(fun: RefFun, args: Vec<Expr>) -> Self {
         Self {
             fun: Expr::FunRef(fun),
             args,
+            kind: CallKind::Static(fun),
+            return_type: None,
         }
     }
+
+    pub fn typed(mut self, kind: CallKind, return_type: RefType) -> Self {
+        self.kind = kind;
+        self.return_type = Some(return_type);
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum StringPart {
+    Literal(String),
+    Expression(Expr),
 }
 
 /// An expression with a value
@@ -156,6 +192,22 @@ pub enum Expr {
     Anonymous(RefType, BTreeMap<RefField, Expr>),
     /// Array access : array\[index]
     Array(Box<Expr>, Box<Expr>),
+    /// A Haxe array literal. Native literals are emitted as `hl.NativeArray`.
+    ArrayLiteral {
+        elements: Vec<Expr>,
+        element_type: Option<RefType>,
+        native: bool,
+    },
+    /// A Haxe map literal. Entries retain their original key/value evaluation order.
+    MapLiteral {
+        entries: Vec<(Expr, Expr)>,
+    },
+    /// A native or dynamic array allocation with a runtime length.
+    ArrayAlloc {
+        length: Box<Expr>,
+        element_type: Option<RefType>,
+        native: bool,
+    },
     /// Exact data loaded by the `Bytes` opcode.
     Bytes(BytesLiteral),
     /// Function call
@@ -171,10 +223,30 @@ pub enum Expr {
     EnumIndex(Box<Expr>),
     /// Source-level enum switch pattern and its wildcard arity.
     EnumPattern(RefType, RefEnumConstruct, usize),
+    /// Enum pattern after constructor arguments have been recovered.
+    EnumPatternBinding(RefType, RefEnumConstruct, Vec<Expr>),
+    /// Runtime access to a constructor parameter outside a source pattern.
+    EnumField {
+        value: Box<Expr>,
+        construct: RefEnumConstruct,
+        field: RefField,
+        result_type: RefType,
+    },
     /// Field access : obj.field
     Field(Box<Expr>, Str),
+    /// Dynamic field access whose name is stored in the string pool.
+    DynamicField(Box<Expr>, RefString),
     /// Function reference
     FunRef(RefFun),
+    /// A call to a parent constructor.
+    SuperCall(Vec<Expr>),
+    /// A non-virtual call to a parent implementation.
+    SuperMethod {
+        method: Str,
+        args: Vec<Expr>,
+        target: RefFun,
+        return_type: RefType,
+    },
     /// Raw typed memory load.
     MemoryLoad {
         memory_type: MemoryType,
@@ -228,7 +300,8 @@ pub enum Expr {
         reference_type: RefType,
         element_type: RefType,
     },
-    /// If/Else expression, both branches expressions types must unify (https://haxe.org/manual/expression-if.html)
+    /// If/Else expression, both branch expression types must unify
+    /// (<https://haxe.org/manual/expression-if.html>).
     IfElse {
         cond: Box<Expr>,
         /// Not empty
@@ -238,6 +311,12 @@ pub enum Expr {
     },
     /// Operator
     Op(Operation),
+    /// Explicit source-level string concatenation.
+    StringConcat(Vec<Expr>),
+    /// Source interpolation recovered from a concatenation/conversion chain.
+    StringInterpolation(Vec<StringPart>),
+    /// A conversion which must remain explicit to keep Haxe typing stable.
+    ToString(Box<Expr>),
     // For when there should be something, but we don't known what
     Unknown(String),
     /// Variable identifier
@@ -350,6 +429,16 @@ pub fn call_fun(fun: RefFun, args: Vec<Expr>) -> Expr {
     Expr::Call(Box::new(Call::new_fun(fun, args)))
 }
 
+pub fn typed_call(fun: Expr, args: Vec<Expr>, kind: CallKind, return_type: RefType) -> Expr {
+    Expr::Call(Box::new(Call::new(fun, args).typed(kind, return_type)))
+}
+
+pub fn typed_call_fun(fun: RefFun, args: Vec<Expr>, return_type: RefType) -> Expr {
+    Expr::Call(Box::new(
+        Call::new_fun(fun, args).typed(CallKind::Static(fun), return_type),
+    ))
+}
+
 pub fn field(expr: Expr, obj: RefType, field: RefField, code: &Bytecode) -> Expr {
     // FIXME meh
     Expr::Field(
@@ -360,6 +449,13 @@ pub fn field(expr: Expr, obj: RefType, field: RefField, code: &Bytecode) -> Expr
 
 #[derive(Debug, Clone)]
 pub enum Statement {
+    /// A declaration placed in the narrowest lexical scope that contains all
+    /// uses of the recovered SSA lifetime.
+    VarDecl {
+        variable: Expr,
+        variable_type: RefType,
+        value: Option<Expr>,
+    },
     /// Variable assignment
     Assign {
         /// Should 'var' appear
@@ -373,6 +469,11 @@ pub enum Statement {
     GlobalStore {
         global: RefGlobal,
         global_type: RefType,
+        value: Expr,
+    },
+    DynamicFieldStore {
+        object: Expr,
+        field: RefString,
         value: Expr,
     },
     /// Raw typed memory write.
@@ -421,6 +522,17 @@ pub enum Statement {
     },
     DoWhile {
         cond: Expr,
+        stmts: Vec<Statement>,
+    },
+    ForEach {
+        variable: Expr,
+        iterable: Expr,
+        stmts: Vec<Statement>,
+    },
+    ForRange {
+        variable: Expr,
+        start: Expr,
+        end: Expr,
         stmts: Vec<Statement>,
     },
     Break,
@@ -523,6 +635,14 @@ pub(crate) fn attach_provenance(statements: &mut [Statement], provenance: Proven
 
 fn attach_statement(statement: &mut Statement, provenance: Provenance) {
     match statement {
+        Statement::VarDecl {
+            variable, value, ..
+        } => {
+            attach_expr(variable, provenance);
+            if let Some(value) = value {
+                attach_expr(value, provenance);
+            }
+        }
         Statement::Assign {
             variable, assign, ..
         } => {
@@ -533,6 +653,10 @@ fn attach_statement(statement: &mut Statement, provenance: Provenance) {
             attach_expr(expression, provenance)
         }
         Statement::GlobalStore { value, .. } => attach_expr(value, provenance),
+        Statement::DynamicFieldStore { object, value, .. } => {
+            attach_expr(object, provenance);
+            attach_expr(value, provenance);
+        }
         Statement::MemoryStore {
             bytes,
             index,
@@ -579,6 +703,26 @@ fn attach_statement(statement: &mut Statement, provenance: Provenance) {
         }
         Statement::While { cond, stmts } | Statement::DoWhile { cond, stmts } => {
             attach_expr(cond, provenance);
+            attach_provenance(stmts, provenance);
+        }
+        Statement::ForEach {
+            variable,
+            iterable,
+            stmts,
+        } => {
+            attach_expr(variable, provenance);
+            attach_expr(iterable, provenance);
+            attach_provenance(stmts, provenance);
+        }
+        Statement::ForRange {
+            variable,
+            start,
+            end,
+            stmts,
+        } => {
+            attach_expr(variable, provenance);
+            attach_expr(start, provenance);
+            attach_expr(end, provenance);
             attach_provenance(stmts, provenance);
         }
         Statement::Try { stmts } | Statement::Catch { stmts } => {
@@ -633,6 +777,18 @@ fn attach_expr(expression: &mut Expr, provenance: Provenance) {
             attach_expr(array, provenance);
             attach_expr(index, provenance);
         }
+        Expr::ArrayLiteral { elements, .. } => {
+            for element in elements {
+                attach_expr(element, provenance);
+            }
+        }
+        Expr::MapLiteral { entries } => {
+            for (key, value) in entries {
+                attach_expr(key, provenance);
+                attach_expr(value, provenance);
+            }
+        }
+        Expr::ArrayAlloc { length, .. } => attach_expr(length, provenance),
         Expr::Bytes(_) => {}
         Expr::Call(call) => {
             attach_expr(&mut call.fun, provenance);
@@ -653,7 +809,25 @@ fn attach_expr(expression: &mut Expr, provenance: Provenance) {
         }
         Expr::EnumIndex(value) => attach_expr(value, provenance),
         Expr::EnumPattern(_, _, _) => {}
-        Expr::Field(receiver, _) => attach_expr(receiver, provenance),
+        Expr::EnumPatternBinding(_, _, variables) => {
+            for variable in variables {
+                attach_expr(variable, provenance);
+            }
+        }
+        Expr::EnumField { value, .. } => attach_expr(value, provenance),
+        Expr::Field(receiver, _) | Expr::DynamicField(receiver, _) => {
+            attach_expr(receiver, provenance)
+        }
+        Expr::SuperCall(arguments) => {
+            for argument in arguments {
+                attach_expr(argument, provenance);
+            }
+        }
+        Expr::SuperMethod { args, .. } => {
+            for argument in args {
+                attach_expr(argument, provenance);
+            }
+        }
         Expr::MemoryLoad { bytes, index, .. } => {
             attach_expr(bytes, provenance);
             attach_expr(index, provenance);
@@ -678,6 +852,19 @@ fn attach_expr(expression: &mut Expr, provenance: Provenance) {
             attach_provenance(else_, provenance);
         }
         Expr::Op(operation) => attach_operation(operation, provenance),
+        Expr::StringConcat(expressions) => {
+            for expression in expressions {
+                attach_expr(expression, provenance);
+            }
+        }
+        Expr::StringInterpolation(parts) => {
+            for part in parts {
+                if let StringPart::Expression(expression) = part {
+                    attach_expr(expression, provenance);
+                }
+            }
+        }
+        Expr::ToString(expression) => attach_expr(expression, provenance),
         Expr::Constant(_) | Expr::FunRef(_) | Expr::Unknown(_) | Expr::Variable(_, _) => {}
         Expr::Provenanced { .. } => return,
     }

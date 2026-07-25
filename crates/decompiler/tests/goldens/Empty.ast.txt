@@ -1,4 +1,9 @@
 Class {
+    ty: Some(
+        RefType(
+            384,
+        ),
+    ),
     name: "Empty",
     parent: None,
     fields: [],
@@ -9,6 +14,8 @@ Class {
             ),
             static_: true,
             dynamic: false,
+            constructor: false,
+            override_: false,
             statements: [],
         },
     ],

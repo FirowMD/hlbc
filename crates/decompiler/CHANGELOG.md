@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased](https://github.com/Gui-Yom/hlbc/compare/v0.7.0...HEAD)
 
+### Added
+
+- Deterministic project decompilation with dependency discovery, parallel
+  function workers, Haxe package layout, manifests, and compilable `build.hxml`
+  output.
+- Conservative interprocedural type, constant, closure, and call-target
+  recovery with dependency-aware function-analysis caching.
+- Provenance-indexed confidence/approximation annotations and declarative
+  compiler-lowering patterns.
+- Opcode mismatch attribution to AST/IR regions and synchronized faithful and
+  readable Haxe views.
+- Versioned `api::v1` extension facade and verified custom-pass runner.
+
 ## [0.7.0](https://github.com/Gui-Yom/hlbc/compare/v0.6.1...v0.7.0) - 2023-11-16
 
 Basically nothing changed. Just keeping version in line with the core crate.
