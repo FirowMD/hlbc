@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ast::*;
 use hlbc::fmt::EnhancedFmt;
-use hlbc::opcodes::Opcode;
+use hlbc::opcodes::{ControlFlowBehavior, Opcode};
 use hlbc::types::{FunPtr, Function, RefField, RefFun, RefString, RefType, Reg, Type, TypeObj};
 use hlbc::{Bytecode, Resolve, Str};
 
@@ -260,12 +260,21 @@ struct DecompilerState<'c> {
     // assignment to the same named register is not a redeclaration.
     seen_named_registers: HashSet<(Str, Reg)>,
     seen_registers: HashSet<Reg>,
+    // Fidelity output must not rename one physical register across debug ranges.
+    stable_register_names: HashMap<Reg, Option<Str>>,
+    claimed_stable_names: HashSet<Str>,
     // Low-level allocations which may become native arrays or Haxe literals.
     array_builders: HashMap<Reg, ArrayBuilder>,
     // Compiler temporaries removed after a complete array literal is recovered.
     array_temp_regs: HashSet<Reg>,
+    // Anonymous enum values currently being populated as closure environments.
+    closure_captures: HashMap<Reg, BTreeMap<RefField, Expr>>,
+    // Captured fields available to a bound anonymous closure body.
+    bound_capture_fields: Option<BTreeMap<RefField, Expr>>,
     // Verified SSA values whose definitions have one use and can be substituted.
     inline_opcodes: HashSet<usize>,
+    // Fidelity output materializes every definition not explicitly approved for inlining.
+    materialize_unapproved_inlines: bool,
     f: &'c Function,
     code: &'c Bytecode,
     function_index: usize,
@@ -298,12 +307,15 @@ impl<'c> DecompilerState<'c> {
             .collect();
         let mut seen_named_registers = HashSet::new();
         let mut seen_registers = HashSet::new();
+        let mut stable_register_names = HashMap::new();
+        let mut claimed_stable_names = HashSet::new();
 
         let mut start = 0;
         // First argument / First register is 'this'
         if f.is_method() || code.get(f.name) == "__constructor__" {
             reg_state.insert(Reg(0), cst_this());
             seen_registers.insert(Reg(0));
+            stable_register_names.insert(Reg(0), None);
             start = 1;
         }
 
@@ -312,7 +324,9 @@ impl<'c> DecompilerState<'c> {
             let name = f.arg_name(code, i - start);
             reg_state.insert(Reg(i as u32), Expr::Variable(Reg(i as u32), name.clone()));
             seen_registers.insert(Reg(i as u32));
+            stable_register_names.insert(Reg(i as u32), name.clone());
             if let Some(name) = name {
+                claimed_stable_names.insert(name.clone());
                 seen_named_registers.insert((name, Reg(i as u32)));
             }
         }
@@ -325,9 +339,14 @@ impl<'c> DecompilerState<'c> {
             copy_protected_regs,
             seen_named_registers,
             seen_registers,
+            stable_register_names,
+            claimed_stable_names,
             array_builders: HashMap::new(),
             array_temp_regs: HashSet::new(),
+            closure_captures: HashMap::new(),
+            bound_capture_fields: None,
             inline_opcodes,
+            materialize_unapproved_inlines: false,
             f,
             code,
             function_index,
@@ -339,6 +358,21 @@ impl<'c> DecompilerState<'c> {
             returns: BTreeMap::new(),
             throws: BTreeMap::new(),
         }
+    }
+
+    fn register_name(&mut self, opcode_index: usize, register: Reg) -> Option<Str> {
+        if !self.materialize_unapproved_inlines {
+            return self.f.var_name(self.code, opcode_index);
+        }
+        if let Some(name) = self.stable_register_names.get(&register) {
+            return name.clone();
+        }
+        let name = self
+            .f
+            .var_name(self.code, opcode_index)
+            .filter(|name| self.claimed_stable_names.insert(name.clone()));
+        self.stable_register_names.insert(register, name.clone());
+        name
     }
 
     fn push_stmt(&mut self, stmt: Statement) {
@@ -405,9 +439,11 @@ impl<'c> DecompilerState<'c> {
 
     // Update the register state and create a statement depending on inline rules
     fn push_expr(&mut self, i: usize, dst: Reg, expr: Expr) {
-        let name = self.f.var_name(self.code, i);
+        let name = self.register_name(i, dst);
         let materialize = self.mutable_regs.contains(&dst)
             || expression_too_complex(&expr, 64, 4096)
+            || (self.materialize_unapproved_inlines
+                && (self.copy_protected_regs.contains(&dst) || !self.inline_opcodes.contains(&i)))
             || (!self.inline_opcodes.contains(&i)
                 && (name.is_some()
                     || (expression_requires_single_evaluation(&expr)
@@ -574,6 +610,24 @@ impl<'c> DecompilerState<'c> {
             return true;
         }
         if (name.is_empty() || name == "<none>") && args.len() == 1 {
+            if let Some(position) = self.expr_ctx.iter().rposition(
+                |context| matches!(context, ExprCtx::Constructor { reg, .. } if *reg == args[0]),
+            ) {
+                let ExprCtx::Constructor { reg, pos } = self.expr_ctx.remove(position) else {
+                    unreachable!()
+                };
+                self.push_expr(
+                    pos,
+                    reg,
+                    post::recover_constructor_and_anonymous_object(
+                        post::ObjectRecoveryCandidate::Constructor {
+                            ty: self.f.regtype(reg),
+                            arguments: Vec::new(),
+                        },
+                    ),
+                );
+                return true;
+            }
             self.push_expr(i, dst, self.expr(args[0]));
             if let Some(mut builder) = self.array_builders.remove(&args[0]) {
                 builder.temporaries.insert(dst);
@@ -766,6 +820,7 @@ fn expression_too_complex<'a>(expression: &'a Expr, max_depth: usize, max_nodes:
             | Expr::DynamicField(length, _)
             | Expr::RuntimeType { value: length, .. }
             | Expr::TypeId { value: length, .. }
+            | Expr::SafeCast { value: length, .. }
             | Expr::VirtualClosure {
                 receiver: length, ..
             }
@@ -816,6 +871,8 @@ fn expression_too_complex<'a>(expression: &'a Expr, max_depth: usize, max_nodes:
                 | Operation::Shr(left, right)
                 | Operation::And(left, right)
                 | Operation::Or(left, right)
+                | Operation::BitAnd(left, right)
+                | Operation::BitOr(left, right)
                 | Operation::Xor(left, right)
                 | Operation::Eq(left, right)
                 | Operation::NotEq(left, right)
@@ -840,9 +897,11 @@ fn expression_too_complex<'a>(expression: &'a Expr, max_depth: usize, max_nodes:
             }
             Expr::Bytes(_)
             | Expr::Constant(_)
-            | Expr::Closure(_, _)
+            | Expr::Closure(_, _, _, _)
+            | Expr::Capture(_)
             | Expr::EnumPattern(_, _, _)
             | Expr::FunRef(_)
+            | Expr::GlobalLoad { .. }
             | Expr::TypeValue { .. }
             | Expr::Unknown(_)
             | Expr::Variable(_, _) => {}
@@ -992,6 +1051,28 @@ fn exact_opcode(provenance: &ir::IrProvenance) -> Option<usize> {
     }
 }
 
+fn is_closure_capture_allocation(function: &Function, opcode_index: usize, register: Reg) -> bool {
+    for opcode in function.ops.iter().skip(opcode_index + 1) {
+        match opcode {
+            Opcode::SetEnumField { value, .. } if *value == register => continue,
+            Opcode::InstanceClosure { obj, .. } if *obj == register => return true,
+            _ => {}
+        }
+        if opcode
+            .register_operands()
+            .iter()
+            .any(|operand| operand.register == register)
+            || !matches!(
+                opcode.metadata().semantics.control_flow,
+                ControlFlowBehavior::Fallthrough
+            )
+        {
+            return false;
+        }
+    }
+    false
+}
+
 fn optimization_inline_opcodes(optimized: &optimize::OptimizedIr) -> HashSet<usize> {
     optimized
         .inline_values
@@ -1035,6 +1116,7 @@ fn decompile_code_legacy(
     f: &Function,
     function_index: usize,
     optimized_ir: &optimize::OptimizedIr,
+    optimization_profile: OptimizationProfile,
 ) -> LegacyOutput {
     let mut compatibility_function = f.clone();
     compatibility_function.ops = optimized_ir.ir.bytecode_compatibility_stream();
@@ -1044,7 +1126,15 @@ fn decompile_code_legacy(
         function_index,
         &mut HashSet::new(),
         Some(optimized_ir),
+        None,
+        optimization_profile,
     )
+}
+
+#[derive(Debug, Clone)]
+struct BoundClosureContext {
+    receiver: Option<Expr>,
+    capture_fields: Option<BTreeMap<RefField, Expr>>,
 }
 
 fn decompile_code_legacy_via_ir(
@@ -1052,6 +1142,7 @@ fn decompile_code_legacy_via_ir(
     function: &Function,
     function_index: usize,
     active_functions: &mut HashSet<usize>,
+    bound: Option<BoundClosureContext>,
 ) -> LegacyOutput {
     let graph = match ControlFlowGraph::build_with_index(function, function_index) {
         Ok(graph) => graph,
@@ -1071,9 +1162,9 @@ fn decompile_code_legacy_via_ir(
             };
         }
     };
-    let typed_ir = ir::TypedIr::build_with_cfg(code, function, graph);
+    let typed_ir = ir::TypedIr::build_with_cfg(code, function, graph.clone());
     let optimized_ir =
-        optimize::optimize(&typed_ir.value, OptimizationProfile::Balanced, false).value;
+        optimize::optimize(&typed_ir.value, OptimizationProfile::Fidelity, false).value;
     let mut compatibility_function = function.clone();
     compatibility_function.ops = optimized_ir.ir.bytecode_compatibility_stream();
     let mut output = decompile_code_legacy_inner(
@@ -1082,8 +1173,56 @@ fn decompile_code_legacy_via_ir(
         function_index,
         active_functions,
         Some(&optimized_ir),
+        bound,
+        OptimizationProfile::Fidelity,
     );
     output.diagnostics.splice(0..0, typed_ir.diagnostics);
+    let mut statements = match structurer::structure_function(
+        code,
+        &compatibility_function,
+        &graph,
+        &output.flat,
+        true,
+    ) {
+        Ok(structured) => {
+            if structured.used_fallback {
+                let reason = structured
+                    .fallback_reason
+                    .unwrap_or_else(|| "complex nested CFG uses state-machine output".to_owned());
+                if let Some(opcode) = compatibility_function.ops.first() {
+                    output.diagnostics.push(Diagnostic::for_opcode(
+                        DiagnosticSeverity::Information,
+                        code,
+                        function_index,
+                        &compatibility_function,
+                        0,
+                        opcode,
+                        reason,
+                    ));
+                }
+            }
+            structured.statements
+        }
+        Err(error) => {
+            output.diagnostics.push(Diagnostic::fatal(
+                function_index,
+                format!("nested structured control-flow verifier: {error}"),
+            ));
+            output.statements
+        }
+    };
+    post::recover_haxe(
+        code,
+        &compatibility_function,
+        &optimized_ir.ir,
+        &mut statements,
+        OptimizationProfile::Fidelity,
+    );
+    ast::attach_provenance(
+        &mut statements,
+        Provenance::new(function_index, 0, compatibility_function.ops.len()),
+    );
+    output.statements = statements;
     output
 }
 
@@ -1093,6 +1232,8 @@ fn decompile_code_legacy_inner(
     function_index: usize,
     active_functions: &mut HashSet<usize>,
     optimized_ir: Option<&optimize::OptimizedIr>,
+    bound: Option<BoundClosureContext>,
+    optimization_profile: OptimizationProfile,
 ) -> LegacyOutput {
     if !active_functions.insert(function_index) {
         return LegacyOutput {
@@ -1120,6 +1261,13 @@ fn decompile_code_legacy_inner(
         inline_opcodes,
         copy_protected_registers,
     );
+    state.materialize_unapproved_inlines = optimization_profile == OptimizationProfile::Fidelity;
+    if let Some(bound) = bound {
+        if let Some(receiver) = bound.receiver {
+            state.reg_state.insert(Reg(0), receiver);
+        }
+        state.bound_capture_fields = bound.capture_fields;
+    }
 
     let iter = f.ops.iter().enumerate();
     for (i, o) in iter {
@@ -1201,7 +1349,11 @@ fn decompile_code_legacy_inner(
                 state.throws.insert(i, state.expr(exc));
                 state.push_stmt(Statement::Throw(state.expr(exc)));
             }
-            Opcode::Trap { .. } => {}
+            &Opcode::Trap { exc, .. } => {
+                let name = state.register_name(i, exc);
+                state.reg_state.insert(exc, Expr::Variable(exc, name));
+                state.seen_registers.insert(exc);
+            }
             Opcode::EndTrap { .. } => {}
             &Opcode::NullCheck { reg } => {
                 state.push_stmt(Statement::RuntimeCheck(RuntimeCheck::Null(state.expr(reg))));
@@ -1281,10 +1433,20 @@ fn decompile_code_legacy_inner(
                 state.push_expr(i, dst, shr(state.expr(a), state.expr(b)));
             }
             &Opcode::And { dst, a, b } => {
-                state.push_expr(i, dst, and(state.expr(a), state.expr(b)));
+                let expression = if matches!(code.types.get(f.regtype(dst).0), Some(Type::Bool)) {
+                    and(state.expr(a), state.expr(b))
+                } else {
+                    bit_and(state.expr(a), state.expr(b))
+                };
+                state.push_expr(i, dst, expression);
             }
             &Opcode::Or { dst, a, b } => {
-                state.push_expr(i, dst, or(state.expr(a), state.expr(b)));
+                let expression = if matches!(code.types.get(f.regtype(dst).0), Some(Type::Bool)) {
+                    or(state.expr(a), state.expr(b))
+                } else {
+                    bit_or(state.expr(a), state.expr(b))
+                };
+                state.push_expr(i, dst, expression);
             }
             &Opcode::Xor { dst, a, b } => {
                 state.push_expr(i, dst, xor(state.expr(a), state.expr(b)));
@@ -1468,9 +1630,10 @@ fn decompile_code_legacy_inner(
                                 function,
                                 nested_index,
                                 active_functions,
+                                None,
                             );
                             state.diagnostics.extend(nested.diagnostics);
-                            Expr::Closure(fun, nested.statements)
+                            Expr::Closure(fun, 0, Vec::new(), nested.statements)
                         }
                     }
                     None => Expr::Unknown("Unresolved closure function".to_string()),
@@ -1482,39 +1645,68 @@ fn decompile_code_legacy_inner(
                     "closure : {}",
                     fun.display::<EnhancedFmt>(code)
                 )));
-                match &code[f[obj]] {
-                    // This is an anonymous enum holding the capture for the closure
-                    Type::Enum { .. } => match fun.as_fn(code) {
-                        Some(function) => {
-                            let nested_index = hashlink_function_index(function);
-                            if active_functions.contains(&nested_index) {
-                                state.diagnose(
-                                    DiagnosticSeverity::Approximation,
-                                    i,
-                                    o,
-                                    "recursive closure body retained as a function reference",
-                                );
-                                state.push_expr(i, dst, Expr::FunRef(fun));
+                let function_name = fun.name(code);
+                let capture_fields = state.closure_captures.remove(&obj);
+                let anonymous = function_name.is_empty() || function_name.as_str() == "<none>";
+                if !anonymous && capture_fields.is_none() {
+                    state.push_expr(
+                        i,
+                        dst,
+                        Expr::Field(Box::new(state.expr(obj)), function_name),
+                    );
+                    continue;
+                }
+                match fun.as_fn(code) {
+                    Some(function) => {
+                        let nested_index = hashlink_function_index(function);
+                        if active_functions.contains(&nested_index) {
+                            state.unhandled(
+                                i,
+                                o,
+                                "recursive bound closure body cannot be expanded safely",
+                            );
+                        } else {
+                            let mut captures = Vec::new();
+                            let (receiver, capture_fields) = if let Some(capture_fields) =
+                                capture_fields
+                            {
+                                let capture_fields = capture_fields
+                                    .into_iter()
+                                    .map(|(field, value)| {
+                                        let name = Str::from(format!(
+                                            "__hl_capture_{}_{}_{}",
+                                            function_index, i, field.0
+                                        ));
+                                        captures.push((name.clone(), value));
+                                        (field, Expr::Capture(name))
+                                    })
+                                    .collect();
+                                (None, Some(capture_fields))
                             } else {
-                                let nested = decompile_code_legacy_via_ir(
-                                    code,
-                                    function,
-                                    nested_index,
-                                    active_functions,
-                                );
-                                state.diagnostics.extend(nested.diagnostics);
-                                state.push_expr(i, dst, Expr::Closure(fun, nested.statements));
-                            }
+                                let name =
+                                    Str::from(format!("__hl_receiver_{}_{}", function_index, i));
+                                captures.push((name.clone(), state.expr(obj)));
+                                (Some(Expr::Capture(name)), None)
+                            };
+                            let nested = decompile_code_legacy_via_ir(
+                                code,
+                                function,
+                                nested_index,
+                                active_functions,
+                                Some(BoundClosureContext {
+                                    receiver,
+                                    capture_fields,
+                                }),
+                            );
+                            state.diagnostics.extend(nested.diagnostics);
+                            state.push_expr(
+                                i,
+                                dst,
+                                Expr::Closure(fun, 1, captures, nested.statements),
+                            );
                         }
-                        None => state.unhandled(i, o, "closure function reference is unresolved"),
-                    },
-                    _ => {
-                        state.push_expr(
-                            i,
-                            dst,
-                            Expr::Field(Box::new(state.expr(obj)), fun.name(code)),
-                        );
                     }
+                    None => state.unhandled(i, o, "closure function reference is unresolved"),
                 }
             }
             &Opcode::VirtualClosure { dst, obj, field } => {
@@ -1612,7 +1804,10 @@ fn decompile_code_legacy_inner(
                                 state.push_expr(
                                     i,
                                     dst,
-                                    Expr::Unknown("unknown enum variant".to_owned()),
+                                    Expr::GlobalLoad {
+                                        global,
+                                        result_type: f.regtype(dst),
+                                    },
                                 );
                             }
                         }
@@ -1698,11 +1893,20 @@ fn decompile_code_legacy_inner(
             //endregion
 
             //region VALUES
+            &Opcode::SafeCast { dst, src } => {
+                state.push_expr(
+                    i,
+                    dst,
+                    Expr::SafeCast {
+                        value: Box::new(state.expr(src)),
+                        target_type: f.regtype(dst),
+                    },
+                );
+            }
             &Opcode::ToDyn { dst, src }
             | &Opcode::ToSFloat { dst, src }
             | &Opcode::ToUFloat { dst, src }
             | &Opcode::ToInt { dst, src }
-            | &Opcode::SafeCast { dst, src }
             | &Opcode::UnsafeCast { dst, src }
             | &Opcode::ToVirtual { dst, src } => {
                 state.push_expr(i, dst, state.expr(src));
@@ -1896,11 +2100,15 @@ fn decompile_code_legacy_inner(
 
             //region ENUMS
             &Opcode::EnumAlloc { dst, construct } => {
-                state.push_expr(
-                    i,
-                    dst,
-                    Expr::EnumConstr(f.regtype(dst), construct, Vec::new()),
-                );
+                if is_closure_capture_allocation(f, i, dst) {
+                    state.closure_captures.entry(dst).or_default();
+                } else {
+                    state.push_expr(
+                        i,
+                        dst,
+                        Expr::EnumConstr(f.regtype(dst), construct, Vec::new()),
+                    );
+                }
             }
             Opcode::MakeEnum {
                 dst,
@@ -1923,6 +2131,17 @@ fn decompile_code_legacy_inner(
                 construct,
                 field,
             } => {
+                if value == Reg(0) {
+                    if let Some(captured) = state
+                        .bound_capture_fields
+                        .as_ref()
+                        .and_then(|fields| fields.get(&field))
+                        .cloned()
+                    {
+                        state.push_expr(i, dst, captured);
+                        continue;
+                    }
+                }
                 state.push_expr(
                     i,
                     dst,
@@ -1933,6 +2152,16 @@ fn decompile_code_legacy_inner(
                         result_type: f.regtype(dst),
                     },
                 );
+            }
+            &Opcode::SetEnumField { value, field, src }
+                if state.closure_captures.contains_key(&value) =>
+            {
+                let captured = state.expr(src);
+                state
+                    .closure_captures
+                    .entry(value)
+                    .or_default()
+                    .insert(field, captured);
             }
             &Opcode::SetEnumField { value, field, src } => match state.expr(value) {
                 Expr::Variable(_, _) => {
@@ -2291,7 +2520,13 @@ pub fn decompile_code_with_options(
     }
 
     let legacy = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        decompile_code_legacy(code, input, function_index, &optimization.value)
+        decompile_code_legacy(
+            code,
+            input,
+            function_index,
+            &optimization.value,
+            options.optimization_profile,
+        )
     }));
     let (legacy_statements, flat) = match legacy {
         Ok(legacy) => {
@@ -2622,12 +2857,14 @@ mod tests {
 
     use hlbc::opcodes::{ControlFlowBehavior, Opcode, OpcodeOperand, SideEffect, OPCODE_SEMANTICS};
     use hlbc::types::{
-        FunPtr, Function, RefBytes, RefEnumConstruct, RefField, RefFun, RefString, RefType, Reg,
-        Type,
+        FunPtr, Function, RefBytes, RefEnumConstruct, RefField, RefFun, RefGlobal, RefInt,
+        RefString, RefType, Reg, Type,
     };
     use hlbc::{Bytecode, Str};
 
-    use crate::ast::{Constant, Expr, MemoryType, RuntimeCheck, StateTerminator, Statement};
+    use crate::ast::{
+        Constant, Expr, MemoryType, Operation, RuntimeCheck, StateTerminator, Statement,
+    };
     use crate::diagnostics::{
         DecompileMode, DecompileOptions, Diagnostic, DiagnosticSeverity, SourceRange,
     };
@@ -2635,8 +2872,8 @@ mod tests {
     use crate::optimize::OptimizationProfile;
     use crate::{
         decompile_class, decompile_code, decompile_code_with_options, decompile_function,
-        opcode_coverage, ArrayBuilder, DecompilerState, DiagnosticCoverage, LoweringCoverage,
-        PendingArrayWrite,
+        decompile_function_with_options, enum_global_constructor, opcode_coverage, ArrayBuilder,
+        DecompilerState, DiagnosticCoverage, LoweringCoverage, PendingArrayWrite,
     };
 
     fn synthetic_function(template: &Function, regs: Vec<RefType>, ops: Vec<Opcode>) -> Function {
@@ -2717,6 +2954,472 @@ mod tests {
 
     fn void_reg() -> RefType {
         RefType(0)
+    }
+
+    fn fidelity_text(code: &Bytecode, function: &Function) -> String {
+        let statements = decompile_code_with_options(
+            code,
+            function,
+            DecompileOptions {
+                mode: DecompileMode::BestEffort,
+                include_unreachable: true,
+                optimization_profile: OptimizationProfile::Fidelity,
+                trace_optimizations: false,
+            },
+        )
+        .unwrap()
+        .value;
+        let format = FormatOptions::new(2);
+        statements
+            .iter()
+            .map(|statement| statement.display(&format, code, function).to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn push_int(code: &mut Bytecode, value: i32) -> RefInt {
+        let reference = RefInt(code.ints.len());
+        code.ints.push(value);
+        reference
+    }
+
+    fn assert_text_order(text: &str, fragments: &[&str]) {
+        let mut start = 0;
+        for fragment in fragments {
+            let Some(offset) = text[start..].find(fragment) else {
+                panic!("missing ordered fragment {fragment:?} in:\n{text}");
+            };
+            start += offset + fragment.len();
+        }
+    }
+
+    #[test]
+    fn fidelity_materializes_loop_back_edges_and_branch_join_values() {
+        let mut code = Bytecode::from_file("../../data/Empty.hl").unwrap();
+        let zero = push_int(&mut code, 0);
+        let one = push_int(&mut code, 1);
+        let three = push_int(&mut code, 3);
+        let ten = push_int(&mut code, 10);
+        let twenty = push_int(&mut code, 20);
+        let template = code.function_by_name("main").unwrap();
+        let function = synthetic_function(
+            template,
+            vec![
+                RefType(3),
+                RefType(3),
+                RefType(3),
+                RefType(3),
+                RefType(3),
+                RefType(7),
+            ],
+            vec![
+                Opcode::Int {
+                    dst: Reg(0),
+                    ptr: zero,
+                },
+                Opcode::Int {
+                    dst: Reg(1),
+                    ptr: one,
+                },
+                Opcode::Int {
+                    dst: Reg(2),
+                    ptr: three,
+                },
+                Opcode::Bool {
+                    dst: Reg(5),
+                    value: true,
+                },
+                Opcode::Label,
+                Opcode::JSGte {
+                    a: Reg(0),
+                    b: Reg(2),
+                    offset: 3,
+                },
+                Opcode::Add {
+                    dst: Reg(3),
+                    a: Reg(0),
+                    b: Reg(1),
+                },
+                Opcode::Mov {
+                    dst: Reg(0),
+                    src: Reg(3),
+                },
+                Opcode::JAlways { offset: -5 },
+                Opcode::JTrue {
+                    cond: Reg(5),
+                    offset: 2,
+                },
+                Opcode::Int {
+                    dst: Reg(4),
+                    ptr: ten,
+                },
+                Opcode::JAlways { offset: 1 },
+                Opcode::Int {
+                    dst: Reg(4),
+                    ptr: twenty,
+                },
+                Opcode::Ret { ret: Reg(4) },
+            ],
+        );
+
+        let rendered = fidelity_text(&code, &function);
+        assert!(rendered.contains("__hl_r3 = __hl_r0 + __hl_r1;"));
+        assert!(rendered.contains("__hl_r0 = __hl_r3;"));
+        assert!(rendered.contains("__hl_r4 = 10;"));
+        assert!(rendered.contains("__hl_r4 = 20;"));
+        assert!(rendered.contains("return __hl_r4;"));
+    }
+
+    #[test]
+    fn and_or_formatting_distinguishes_integer_and_boolean_types() {
+        let mut code = Bytecode::from_file("../../data/Empty.hl").unwrap();
+        let one = push_int(&mut code, 1);
+        let two = push_int(&mut code, 2);
+        let template = code.function_by_name("main").unwrap();
+        let function = synthetic_function(
+            template,
+            vec![
+                RefType(3),
+                RefType(3),
+                RefType(3),
+                RefType(7),
+                RefType(7),
+                RefType(7),
+                void_reg(),
+            ],
+            vec![
+                Opcode::Int {
+                    dst: Reg(0),
+                    ptr: one,
+                },
+                Opcode::Int {
+                    dst: Reg(1),
+                    ptr: two,
+                },
+                Opcode::And {
+                    dst: Reg(2),
+                    a: Reg(0),
+                    b: Reg(1),
+                },
+                Opcode::Or {
+                    dst: Reg(2),
+                    a: Reg(0),
+                    b: Reg(1),
+                },
+                Opcode::Bool {
+                    dst: Reg(3),
+                    value: true,
+                },
+                Opcode::Bool {
+                    dst: Reg(4),
+                    value: false,
+                },
+                Opcode::And {
+                    dst: Reg(5),
+                    a: Reg(3),
+                    b: Reg(4),
+                },
+                Opcode::Or {
+                    dst: Reg(5),
+                    a: Reg(3),
+                    b: Reg(4),
+                },
+                Opcode::Ret { ret: Reg(6) },
+            ],
+        );
+
+        let result = decompile_code_with_options(
+            &code,
+            &function,
+            DecompileOptions {
+                optimization_profile: OptimizationProfile::Fidelity,
+                ..DecompileOptions::default()
+            },
+        )
+        .unwrap();
+        let mut operations = Vec::new();
+        for statement in &result.value {
+            if let Statement::Assign { assign, .. } = raw_statement(statement) {
+                if let Expr::Op(operation) = raw_expression(assign) {
+                    operations.push(operation);
+                }
+            }
+        }
+        assert!(operations
+            .iter()
+            .any(|operation| matches!(operation, Operation::BitAnd(..))));
+        assert!(operations
+            .iter()
+            .any(|operation| matches!(operation, Operation::BitOr(..))));
+        assert!(operations
+            .iter()
+            .any(|operation| matches!(operation, Operation::And(..))));
+        assert!(operations
+            .iter()
+            .any(|operation| matches!(operation, Operation::Or(..))));
+        let rendered = fidelity_text(&code, &function);
+        assert!(rendered.contains(" & "));
+        assert!(rendered.contains(" | "));
+        assert!(rendered.contains(" && "));
+        assert!(rendered.contains(" || "));
+    }
+
+    #[test]
+    fn trap_handler_and_rethrow_share_the_declared_exception_register() {
+        let code = Bytecode::from_file("../../data/Empty.hl").unwrap();
+        let catch_globals = code
+            .types
+            .iter()
+            .filter_map(Type::get_type_obj)
+            .filter(|object| object.global.0 > 0)
+            .map(|object| object.global.0 as i32 - 1)
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_eq!(catch_globals.len(), 2);
+        let template = code.function_by_name("main").unwrap();
+        let function = synthetic_function(
+            template,
+            vec![RefType(9), RefType(9), void_reg()],
+            vec![
+                Opcode::Null { dst: Reg(0) },
+                Opcode::Trap {
+                    exc: Reg(1),
+                    offset: 7,
+                },
+                Opcode::Catch {
+                    offset: catch_globals[0],
+                },
+                Opcode::Catch {
+                    offset: catch_globals[1],
+                },
+                Opcode::NullCheck { reg: Reg(0) },
+                Opcode::EndTrap { exc: Reg(1) },
+                Opcode::JAlways { offset: 3 },
+                Opcode::Nop,
+                Opcode::Nop,
+                Opcode::Rethrow { exc: Reg(1) },
+                Opcode::Ret { ret: Reg(2) },
+            ],
+        );
+
+        let rendered = fidelity_text(&code, &function);
+        assert_eq!(
+            rendered.matches("var __hl_r1: Dynamic").count(),
+            1,
+            "{rendered}"
+        );
+        assert_eq!(
+            rendered.matches("catch (__hl_caught_").count(),
+            2,
+            "{rendered}"
+        );
+        assert_eq!(
+            rendered.matches("__hl_r1 = __hl_caught_").count(),
+            2,
+            "{rendered}"
+        );
+        assert_eq!(rendered.matches("throw __hl_r1;").count(), 1, "{rendered}");
+        assert!(!rendered.contains("missing expr"), "{rendered}");
+    }
+
+    #[test]
+    fn loop_built_array_keeps_allocation_and_copy_identity() {
+        let mut code = Bytecode::from_file("../../data/Empty.hl").unwrap();
+        let zero = push_int(&mut code, 0);
+        let three = push_int(&mut code, 3);
+        let template = code.function_by_name("main").unwrap();
+        let function = synthetic_function(
+            template,
+            vec![RefType(11), RefType(3), RefType(3), RefType(11)],
+            vec![
+                Opcode::New { dst: Reg(0) },
+                Opcode::Int {
+                    dst: Reg(1),
+                    ptr: zero,
+                },
+                Opcode::Int {
+                    dst: Reg(2),
+                    ptr: three,
+                },
+                Opcode::Label,
+                Opcode::JSGte {
+                    a: Reg(1),
+                    b: Reg(2),
+                    offset: 3,
+                },
+                Opcode::SetArray {
+                    array: Reg(0),
+                    index: Reg(1),
+                    src: Reg(1),
+                },
+                Opcode::Incr { dst: Reg(1) },
+                Opcode::JAlways { offset: -5 },
+                Opcode::Mov {
+                    dst: Reg(3),
+                    src: Reg(0),
+                },
+                Opcode::Ret { ret: Reg(3) },
+            ],
+        );
+
+        let rendered = fidelity_text(&code, &function);
+        assert!(
+            rendered.contains("var __hl_r0 = { var __a = new hl.NativeArray"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("__hl_r0[__hl_r1] = __hl_r1;"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("__hl_r3 = __hl_r0;"), "{rendered}");
+        assert!(rendered.contains("return __hl_r3;"), "{rendered}");
+        assert!(!rendered.contains("missing expr"), "{rendered}");
+    }
+
+    #[test]
+    fn unresolved_enum_global_keeps_its_indexed_runtime_value() {
+        let mut code = Bytecode::from_file("../../data/Enums.hl").unwrap();
+        let enum_type = RefType(
+            code.types
+                .iter()
+                .position(|ty| matches!(ty, Type::Enum { .. }))
+                .unwrap(),
+        );
+        let global = RefGlobal(code.globals.len());
+        code.globals.push(enum_type);
+        assert!(enum_global_constructor(&code, enum_type, global).is_none());
+        let template = code.function_by_name("main").unwrap();
+        let function = synthetic_function(
+            template,
+            vec![enum_type],
+            vec![
+                Opcode::GetGlobal {
+                    dst: Reg(0),
+                    global,
+                },
+                Opcode::Ret { ret: Reg(0) },
+            ],
+        );
+
+        let result = decompile_code_with_options(
+            &code,
+            &function,
+            DecompileOptions {
+                optimization_profile: OptimizationProfile::Fidelity,
+                ..DecompileOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(contains_statement(&result.value, &|statement| {
+            matches!(
+                statement,
+                Statement::Assign {
+                    assign,
+                    ..
+                } if matches!(
+                    raw_expression(assign),
+                    Expr::GlobalLoad {
+                        global: found,
+                        result_type
+                    } if *found == global && *result_type == enum_type
+                )
+            )
+        }));
+        let rendered = fidelity_text(&code, &function);
+        assert!(rendered.contains(&format!("__HlRuntime.getGlobal({})", global.0)));
+        assert!(!rendered.contains("unknown enum variant"));
+    }
+
+    #[test]
+    fn safe_cast_retains_checked_target_type() {
+        let code = Bytecode::from_file("../../data/Empty.hl").unwrap();
+        let template = code.function_by_name("main").unwrap();
+        let function = synthetic_function(
+            template,
+            vec![RefType(9), RefType(11)],
+            vec![
+                Opcode::Null { dst: Reg(0) },
+                Opcode::SafeCast {
+                    dst: Reg(1),
+                    src: Reg(0),
+                },
+                Opcode::NullCheck { reg: Reg(1) },
+                Opcode::Ret { ret: Reg(1) },
+            ],
+        );
+
+        let result = decompile_code_with_options(
+            &code,
+            &function,
+            DecompileOptions {
+                optimization_profile: OptimizationProfile::Fidelity,
+                ..DecompileOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(contains_statement(&result.value, &|statement| {
+            matches!(
+                statement,
+                Statement::Assign {
+                    assign,
+                    ..
+                } if matches!(
+                    raw_expression(assign),
+                    Expr::SafeCast {
+                        target_type: RefType(11),
+                        ..
+                    }
+                )
+            )
+        }));
+        let rendered = fidelity_text(&code, &function);
+        assert!(
+            rendered.contains("cast(__hl_r0, hl.NativeArray<Dynamic>)"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("missing expr"), "{rendered}");
+    }
+
+    #[test]
+    fn bound_and_captured_anonymous_closures_keep_receiver_and_environment() {
+        let code = Bytecode::from_file("../../data/SemanticAudit.hl").unwrap();
+        let bound = code.function_by_name("boundUnnamed").unwrap();
+        let captured = code.function_by_name("capturedEnvironment").unwrap();
+
+        let bound_text = fidelity_text(&code, bound);
+        assert!(bound_text.contains("-> {"), "{bound_text}");
+        assert!(
+            bound_text.contains("var __hl_receiver_") && bound_text.contains(" = this;"),
+            "{bound_text}"
+        );
+        assert!(bound_text.contains(".applyBias("), "{bound_text}");
+        assert!(!bound_text.contains("_none_"), "{bound_text}");
+        assert!(!bound_text.contains("missing expr"), "{bound_text}");
+
+        let captured_text = fidelity_text(&code, captured);
+        assert!(captured_text.contains("() -> {"), "{captured_text}");
+        assert!(
+            captured_text.contains("var __hl_r2 = [previous];")
+                && captured_text.contains("var __hl_capture_")
+                && captured_text.contains(" = value;")
+                && captured_text.contains(" = __hl_r2;"),
+            "{captured_text}"
+        );
+        assert!(
+            captured_text.contains("var __hl_r1 = __hl_capture_")
+                && captured_text.contains("var __hl_r3 = __hl_capture_")
+                && captured_text.contains("__hl_r3 = __hl_r3 + __hl_r5;")
+                && captured_text.contains(".setI32(")
+                && captured_text.contains("return __hl_r2;"),
+            "{captured_text}"
+        );
+        assert!(!captured_text.contains("_none_"), "{captured_text}");
+        assert!(!captured_text.contains("missing expr"), "{captured_text}");
+
+        let copied = fidelity_text(&code, code.function_by_name("buildAndCopy").unwrap());
+        assert!(copied.contains("new Array<Int>()"), "{copied}");
+        assert!(copied.contains(".push("), "{copied}");
+        assert!(copied.contains(".copy()"), "{copied}");
     }
 
     #[test]
@@ -3296,12 +3999,250 @@ mod tests {
         assert_eq!(function.regs.len(), 78);
         assert_eq!(function.ops.len(), 2611);
 
-        let decompiled = decompile_function(&code, function).unwrap();
+        let decompiled = decompile_function_with_options(
+            &code,
+            function,
+            DecompileOptions {
+                mode: DecompileMode::BestEffort,
+                include_unreachable: true,
+                optimization_profile: OptimizationProfile::Fidelity,
+                trace_optimizations: false,
+            },
+        )
+        .unwrap();
         let formatted = decompiled
             .value
             .display(&code, &FormatOptions::new(2))
             .to_string();
         assert!(!formatted.is_empty());
+        for update in [
+            "__hl_r14 = __hl_r15;\n        __hl_state = 7;",
+            "__hl_r14 = __hl_r15;\n        __hl_state = 9;",
+            "__hl_r15 = __hl_r16;\n        __hl_state = 12;",
+            "__hl_r15 = __hl_r16;\n        __hl_state = 14;",
+            "__hl_r16 = __hl_r17;\n        __hl_state = 17;",
+            "__hl_r16 = __hl_r17;\n        __hl_state = 19;",
+        ] {
+            assert!(
+                formatted.contains(update),
+                "angle-normalization back edge lost update:\n{update}"
+            );
+        }
+        assert!(formatted.contains("if (x > __hl_r2) {"));
+        assert!(formatted.contains("__hl_r1 = __hl_r1 & __hl_r2;"));
+        assert!(formatted.contains("__hl_r1 = __hl_r1 % x;"));
+        assert!(formatted.contains("__hl_r21 = __hl_r35(__hl_r21);"));
+        assert!(!formatted.contains("null(__hl_r31.length)"));
+        assert!(!formatted.contains("&& 1073741823"));
+    }
+
+    #[test]
+    fn decomp_optional_audit_sample_semantic_regressions() {
+        let Some(path) = std::env::var_os("HLBC_HLBOOT") else {
+            return;
+        };
+        let code = Bytecode::from_file(path).unwrap();
+        macro_rules! audited {
+            ($index:literal, $name:literal, $opcodes:literal) => {{
+                let Some(FunPtr::Fun(function)) = code.safe_get_ref_fun(RefFun($index)) else {
+                    panic!("hlboot function {} is missing or native", $index);
+                };
+                assert_eq!(function.name(&code), $name);
+                assert_eq!(function.ops.len(), $opcodes);
+                let text = fidelity_text(&code, function);
+                assert!(!text.contains("missing expr"), "{}@{}", $name, $index);
+                assert!(!text.contains("_none_"), "{}@{}", $name, $index);
+                text
+            }};
+        }
+
+        let delay = audited!(1509, "delay", 8);
+        assert!(
+            delay.contains(" = f;") && delay.contains(" = t;"),
+            "{delay}"
+        );
+        assert_text_order(
+            &delay,
+            &[".stop();", "__hl_r3();", "t.run = __hl_r4;", "return t;"],
+        );
+
+        let get_pass = audited!(1449, "getPass", 12);
+        assert_text_order(
+            &get_pass,
+            &["p = this.passes;", "__hl_r3 = p.nextPass;", "p = __hl_r3;"],
+        );
+        assert!(get_pass.contains("return p;") && get_pass.contains("return __hl_r3;"));
+
+        let blit = audited!(307, "blit", 29);
+        assert!(blit.contains("= cast(src, Array<Int>);"), "{blit}");
+        assert!(
+            blit.contains("__HlNatives.f2087(__hl_r10, __hl_r7, __hl_r12, __hl_r8, __hl_r16);"),
+            "{blit}"
+        );
+
+        let unshift = audited!(244, "unshift", 29);
+        assert_text_order(
+            &unshift,
+            &[
+                "__hl_r11 = __hl_r11 - __hl_r12;",
+                "__hl_r11 = __hl_r11 << __hl_r12;",
+                "__HlNatives.f2087(__hl_r5, __hl_r3, __hl_r9, __hl_r10, __hl_r11);",
+                "__hl_r8.setF32(__hl_r10, x);",
+            ],
+        );
+
+        let parent_changed = audited!(1229, "onParentChanged", 18);
+        assert_text_order(
+            &parent_changed,
+            &["c = __hl_r6;", "__hl_r1++;", "c.onParentChanged();"],
+        );
+
+        let repeat = audited!(1499, "repeat", 49);
+        assert_text_order(
+            &repeat,
+            &[
+                "__hl_r11 = __hl_r10;",
+                "__hl_r13 = __hl_r10.next;",
+                "__hl_r10 = __hl_r13;",
+                "__hl_state = 3;",
+            ],
+        );
+        assert!(!repeat.contains("null.next"), "{repeat}");
+
+        let update = audited!(1761, "update", 123);
+        assert!(
+            update.matches("__hl_r6 = this.queues;").count() >= 2,
+            "{update}"
+        );
+        assert!(update.contains("__hl_r8 = __hl_r6.array;"), "{update}");
+        assert!(!update.contains("q.array"), "{update}");
+
+        let on_event = audited!(3187, "onEvent", 125);
+        assert!(
+            on_event.contains("__hl_r2 = 6;") && on_event.contains("__hl_r2 = 5;"),
+            "{on_event}"
+        );
+        assert_text_order(
+            &on_event,
+            &[
+                "__hl_r2 = e.keyCode;",
+                "__hl_r4 = __hl_r2 << __hl_r4;",
+                "__hl_r2 = __hl_r9.getI32(__hl_r4);",
+            ],
+        );
+
+        let upload = audited!(2603, "uploadTexturePixels", 72);
+        assert!(
+            upload.contains("__hl_r16 = 2;")
+                && upload.contains("__hl_r16 = 4;")
+                && upload.contains("__hl_r15 = __hl_r15 * __hl_r16;"),
+            "{upload}"
+        );
+        assert!(upload.contains("__hl_r9 = __hl_r9 | __hl_r15;"), "{upload}");
+        assert!(!upload.contains("__hl_r9 ||"), "{upload}");
+
+        let frustum = audited!(2665, "inFrustumMatrix", 135);
+        assert_text_order(
+            &frustum,
+            &[
+                "var oldX = this.x;",
+                "var oldY = this.y;",
+                "var oldZ = this.z;",
+                "this.x = __hl_r10;",
+                "this.y = __hl_r11;",
+                "this.z = __hl_r12;",
+            ],
+        );
+        assert_eq!(frustum.matches("__HlNatives.f1042(").count(), 3);
+        assert!(
+            frustum.contains("__hl_r10 = __hl_r13;")
+                && frustum.contains("__hl_r11 = __hl_r13;")
+                && frustum.contains("__hl_r12 = __hl_r13;")
+                && frustum.contains("_Math.max(__hl_r10, __hl_r11)")
+                && frustum.contains("_Math.max(__hl_r14, __hl_r12)"),
+            "{frustum}"
+        );
+
+        let read_pixels = audited!(2433, "readPixels", 256);
+        assert!(
+            read_pixels.contains("baseDict = new Array<Dynamic>();")
+                && read_pixels.contains("dict = new Array<Dynamic>();")
+                && read_pixels.contains("baseDict.__expand(i);")
+                && read_pixels.contains("__hl_r28[i] = __hl_r23;"),
+            "{read_pixels}"
+        );
+        assert!(
+            read_pixels.contains("__hl_r25 = __hl_r10 | __hl_r26;")
+                && read_pixels.contains("__hl_r25 = __hl_r10 & codeMask;"),
+            "{read_pixels}"
+        );
+        assert_text_order(
+            &read_pixels,
+            &[
+                "__hl_r27 = __hl_r19;",
+                "__hl_r19++;",
+                "pixels.set(__hl_r27, __hl_r26);",
+            ],
+        );
+
+        let compile_shader = audited!(2607, "compileShader", 229);
+        assert!(
+            compile_shader.contains("__HlRuntime.getGlobal(829)")
+                && compile_shader.contains("catch (__hl_r14: Dynamic)")
+                && compile_shader.contains("throw __hl_r14;")
+                && compile_shader.contains("throw __hl_r24;"),
+            "{compile_shader}"
+        );
+        assert!(
+            compile_shader.contains("(__hl_r1: EReg) -> {")
+                && compile_shader.contains("samplers.make(v, __hl_r42)")
+                && compile_shader.contains("__hl_r27.paramsContent = __hl_r30;"),
+            "{compile_shader}"
+        );
+
+        let sync = audited!(2647, "sync", 594);
+        assert_text_order(
+            &sync,
+            &[
+                "__hl_r12 = 1;",
+                "__hl_r11 = __hl_r8 + __hl_r12;",
+                "__hl_r12 = this.frameCount;",
+                "__hl_r11 = __hl_r11 % __hl_r12;",
+            ],
+        );
+        assert!(
+            sync.contains("__hl_r14 = __hl_r14 + __hl_r32;")
+                && sync.contains("__hl_r14 = __hl_r14 - __hl_r32;")
+                && sync.contains("__hl_r15 = __hl_r15 | __hl_r18;")
+                && sync.contains("__hl_r50 = __hl_r50 & __hl_r68;"),
+            "{sync}"
+        );
+
+        let render = audited!(1803, "render", 1342);
+        assert!(
+            render.contains("(cast __HlRuntime.getGlobal(349) : BlendMode)")
+                && render.contains(".blendMode = __hl_r65;"),
+            "{render}"
+        );
+
+        let map_expr = audited!(3569, "mapExpr", 895);
+        assert!(
+            map_expr.contains("var __hl_receiver_3569_5 = this;")
+                && map_expr.contains("(__hl_r1:")
+                && map_expr.contains("__hl_receiver_3569_5.mapExpr(__hl_r1, __hl_r3)")
+                && map_expr.contains("_Tools.map(e, __hl_r7);"),
+            "{map_expr}"
+        );
+
+        let shoot = audited!(1821, "shoot", 2611);
+        assert!(
+            shoot.contains("__hl_r14 = __hl_r15;")
+                && shoot.contains("__hl_r15 = __hl_r16;")
+                && shoot.contains("__hl_r16 = __hl_r17;")
+                && shoot.contains("__hl_r1 = __hl_r1 & __hl_r2;")
+                && shoot.contains("__hl_r21 = __hl_r35(__hl_r21);"),
+            "{shoot}"
+        );
     }
 
     #[test]

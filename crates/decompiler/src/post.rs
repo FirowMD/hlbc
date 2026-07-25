@@ -1264,8 +1264,10 @@ fn recover_range_at(statements: &[Statement], loop_index: usize) -> Option<(usiz
         else {
             return None;
         };
-        (same_variable(assign, counter) && !same_variable(variable, counter))
-            .then(|| (position, variable.clone()))
+        (matches!(raw_expr(variable), Expr::Variable(..))
+            && same_variable(assign, counter)
+            && !same_variable(variable, counter))
+        .then(|| (position, variable.clone()))
     });
     body.remove(increment);
     let variable = if let Some((position, variable)) = loop_variable {
@@ -1385,7 +1387,12 @@ fn rename_statement_variables(statements: &mut [Statement], renames: &HashMap<(R
                     rename_expr(argument, renames);
                 }
             }
-            Expr::Closure(_, body) => rename_statement_variables(body, renames),
+            Expr::Closure(_, _, captures, body) => {
+                for (_, value) in captures {
+                    rename_expr(value, renames);
+                }
+                rename_statement_variables(body, renames);
+            }
             Expr::EnumConstr(_, _, arguments)
             | Expr::EnumPatternBinding(_, _, arguments)
             | Expr::SuperCall(arguments) => {
@@ -1403,6 +1410,7 @@ fn rename_statement_variables(statements: &mut [Statement], renames: &HashMap<(R
             | Expr::DynamicField(value, _)
             | Expr::RuntimeType { value, .. }
             | Expr::TypeId { value, .. }
+            | Expr::SafeCast { value, .. }
             | Expr::VirtualClosure {
                 receiver: value, ..
             }
@@ -1440,8 +1448,10 @@ fn rename_statement_variables(statements: &mut [Statement], renames: &HashMap<(R
             } => rename_expr(inner, renames),
             Expr::Bytes(_)
             | Expr::Constant(_)
+            | Expr::Capture(_)
             | Expr::EnumPattern(_, _, _)
             | Expr::FunRef(_)
+            | Expr::GlobalLoad { .. }
             | Expr::TypeValue { .. }
             | Expr::Unknown(_)
             | Expr::Variable(_, None) => {}
@@ -1458,6 +1468,8 @@ fn rename_statement_variables(statements: &mut [Statement], renames: &HashMap<(R
             | Operation::Shr(left, right)
             | Operation::And(left, right)
             | Operation::Or(left, right)
+            | Operation::BitAnd(left, right)
+            | Operation::BitOr(left, right)
             | Operation::Xor(left, right)
             | Operation::Eq(left, right)
             | Operation::NotEq(left, right)
@@ -1737,6 +1749,7 @@ fn expression_variables(expression: &Expr, variables: &mut Vec<(Reg, Option<Str>
         | Expr::EnumField { value, .. }
         | Expr::RuntimeType { value, .. }
         | Expr::TypeId { value, .. }
+        | Expr::SafeCast { value, .. }
         | Expr::VirtualClosure {
             receiver: value, ..
         }
@@ -1766,6 +1779,8 @@ fn expression_variables(expression: &Expr, variables: &mut Vec<(Reg, Option<Str>
             | Operation::Shr(left, right)
             | Operation::And(left, right)
             | Operation::Or(left, right)
+            | Operation::BitAnd(left, right)
+            | Operation::BitOr(left, right)
             | Operation::Xor(left, right)
             | Operation::Eq(left, right)
             | Operation::NotEq(left, right)
@@ -1788,11 +1803,13 @@ fn expression_variables(expression: &Expr, variables: &mut Vec<(Reg, Option<Str>
                 }
             }
         }
-        Expr::Closure(_, _)
+        Expr::Closure(_, _, _, _)
+        | Expr::Capture(_)
         | Expr::Bytes(_)
         | Expr::Constant(_)
         | Expr::EnumPattern(_, _, _)
         | Expr::FunRef(_)
+        | Expr::GlobalLoad { .. }
         | Expr::TypeValue { .. }
         | Expr::Unknown(_)
         | Expr::Provenanced { .. } => {}
@@ -2346,7 +2363,7 @@ pub(crate) fn visit_expr(code: &Bytecode, expr: &mut Expr, visitors: &mut [Box<d
             }
         }
         // /!\ No recurse in closure, as closure decompilation is already recursive.
-        Expr::Closure(_, _) => {}
+        Expr::Closure(_, _, _, _) | Expr::Capture(_) => {}
         Expr::EnumConstr(_, _, args) => {
             for arg in args {
                 rec!(arg);
@@ -2364,6 +2381,7 @@ pub(crate) fn visit_expr(code: &Bytecode, expr: &mut Expr, visitors: &mut [Box<d
             rec!(obj);
         }
         Expr::FunRef(_) => {}
+        Expr::GlobalLoad { .. } => {}
         Expr::SuperCall(arguments) => {
             for argument in arguments {
                 rec!(argument);
@@ -2379,7 +2397,9 @@ pub(crate) fn visit_expr(code: &Bytecode, expr: &mut Expr, visitors: &mut [Box<d
             rec!(index);
         }
         Expr::TypeValue { .. } => {}
-        Expr::RuntimeType { value, .. } | Expr::TypeId { value, .. } => rec!(value),
+        Expr::RuntimeType { value, .. }
+        | Expr::TypeId { value, .. }
+        | Expr::SafeCast { value, .. } => rec!(value),
         Expr::VirtualClosure { receiver, .. } => rec!(receiver),
         Expr::Reference { value, .. } => rec!(value),
         Expr::Dereference { reference, .. } => rec!(reference),
@@ -2429,6 +2449,14 @@ pub(crate) fn visit_expr(code: &Bytecode, expr: &mut Expr, visitors: &mut [Box<d
                 rec!(e2);
             }
             Operation::Or(e1, e2) => {
+                rec!(e1);
+                rec!(e2);
+            }
+            Operation::BitAnd(e1, e2) => {
+                rec!(e1);
+                rec!(e2);
+            }
+            Operation::BitOr(e1, e2) => {
                 rec!(e1);
                 rec!(e2);
             }

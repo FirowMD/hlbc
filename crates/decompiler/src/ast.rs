@@ -93,10 +93,14 @@ pub enum Operation {
     Shl(Box<Expr>, Box<Expr>),
     /// `>>`
     Shr(Box<Expr>, Box<Expr>),
-    /// && &
+    /// &&
     And(Box<Expr>, Box<Expr>),
-    /// || |
+    /// ||
     Or(Box<Expr>, Box<Expr>),
+    /// &
+    BitAnd(Box<Expr>, Box<Expr>),
+    /// |
+    BitOr(Box<Expr>, Box<Expr>),
     /// ^
     Xor(Box<Expr>, Box<Expr>),
     /// \-
@@ -216,8 +220,12 @@ pub enum Expr {
     Constant(Constant),
     /// Constructor call
     Constructor(ConstructorCall),
-    /// Arrow function (...) -> {...}
-    Closure(RefFun, Vec<Statement>),
+    /// Arrow function (...) -> {...}. The leading arguments were bound by
+    /// the closure opcode and are omitted from the callable signature.
+    /// Captures bind VM environment fields before the nested body is entered.
+    Closure(RefFun, usize, Vec<(Str, Expr)>, Vec<Statement>),
+    /// A lexical value introduced by an enclosing closure capture binding.
+    Capture(Str),
     EnumConstr(RefType, RefEnumConstruct, Vec<Expr>),
     /// Runtime enum tag used by bytecode switch lowering.
     EnumIndex(Box<Expr>),
@@ -238,6 +246,11 @@ pub enum Expr {
     DynamicField(Box<Expr>, RefString),
     /// Function reference
     FunRef(RefFun),
+    /// Exact indexed global load when no source-level name is recoverable.
+    GlobalLoad {
+        global: RefGlobal,
+        result_type: RefType,
+    },
     /// A call to a parent constructor.
     SuperCall(Vec<Expr>),
     /// A non-virtual call to a parent implementation.
@@ -268,6 +281,11 @@ pub enum Expr {
     TypeId {
         value: Box<Expr>,
         result_type: RefType,
+    },
+    /// Checked HashLink `SafeCast` to the destination register type.
+    SafeCast {
+        value: Box<Expr>,
+        target_type: RefType,
     },
     /// A virtually-dispatched method closure with an explicitly captured receiver.
     VirtualClosure {
@@ -374,6 +392,8 @@ make_op_shorthand!(shl, Shl, e1, e2);
 make_op_shorthand!(shr, Shr, e1, e2);
 make_op_shorthand!(and, And, e1, e2);
 make_op_shorthand!(or, Or, e1, e2);
+make_op_shorthand!(bit_and, BitAnd, e1, e2);
+make_op_shorthand!(bit_or, BitOr, e1, e2);
 make_op_shorthand!(xor, Xor, e1, e2);
 make_op_shorthand!(neg, Neg, e1);
 make_op_shorthand!(incr, Incr, e1);
@@ -801,7 +821,12 @@ fn attach_expr(expression: &mut Expr, provenance: Provenance) {
                 attach_expr(argument, provenance);
             }
         }
-        Expr::Closure(_, statements) => attach_provenance(statements, provenance),
+        Expr::Closure(_, _, captures, statements) => {
+            for (_, value) in captures {
+                attach_expr(value, provenance);
+            }
+            attach_provenance(statements, provenance);
+        }
         Expr::EnumConstr(_, _, arguments) => {
             for argument in arguments {
                 attach_expr(argument, provenance);
@@ -833,9 +858,9 @@ fn attach_expr(expression: &mut Expr, provenance: Provenance) {
             attach_expr(index, provenance);
         }
         Expr::TypeValue { .. } => {}
-        Expr::RuntimeType { value, .. } | Expr::TypeId { value, .. } => {
-            attach_expr(value, provenance)
-        }
+        Expr::RuntimeType { value, .. }
+        | Expr::TypeId { value, .. }
+        | Expr::SafeCast { value, .. } => attach_expr(value, provenance),
         Expr::VirtualClosure { receiver, .. } => attach_expr(receiver, provenance),
         Expr::Reference { value, .. } => attach_expr(value, provenance),
         Expr::Dereference { reference, .. } => attach_expr(reference, provenance),
@@ -865,7 +890,12 @@ fn attach_expr(expression: &mut Expr, provenance: Provenance) {
             }
         }
         Expr::ToString(expression) => attach_expr(expression, provenance),
-        Expr::Constant(_) | Expr::FunRef(_) | Expr::Unknown(_) | Expr::Variable(_, _) => {}
+        Expr::Constant(_)
+        | Expr::FunRef(_)
+        | Expr::GlobalLoad { .. }
+        | Expr::Capture(_)
+        | Expr::Unknown(_)
+        | Expr::Variable(_, _) => {}
         Expr::Provenanced { .. } => return,
     }
     let original = std::mem::replace(expression, Expr::Unknown(String::new()));
@@ -887,6 +917,8 @@ fn attach_operation(operation: &mut Operation, provenance: Provenance) {
         | Shr(a, b)
         | And(a, b)
         | Or(a, b)
+        | BitAnd(a, b)
+        | BitOr(a, b)
         | Xor(a, b)
         | Eq(a, b)
         | NotEq(a, b)

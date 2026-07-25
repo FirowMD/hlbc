@@ -433,7 +433,10 @@ fn visit_expr(expression: &Expr, path: &str, regions: &mut Vec<AstRegion>) {
                 visit_expr(argument, &format!("{path}/argument[{index}]"), regions);
             }
         }
-        Expr::Closure(_, statements) => {
+        Expr::Closure(_, _, captures, statements) => {
+            for (index, (_, value)) in captures.iter().enumerate() {
+                visit_expr(value, &format!("{path}/capture[{index}]"), regions);
+            }
             visit_statements(statements, &format!("{path}/closure"), regions)
         }
         Expr::EnumConstr(_, _, arguments) | Expr::SuperCall(arguments) => {
@@ -452,6 +455,7 @@ fn visit_expr(expression: &Expr, path: &str, regions: &mut Vec<AstRegion>) {
         | Expr::DynamicField(value, _)
         | Expr::RuntimeType { value, .. }
         | Expr::TypeId { value, .. }
+        | Expr::SafeCast { value, .. }
         | Expr::VirtualClosure {
             receiver: value, ..
         }
@@ -496,8 +500,10 @@ fn visit_expr(expression: &Expr, path: &str, regions: &mut Vec<AstRegion>) {
         }
         Expr::Bytes(_)
         | Expr::Constant(_)
+        | Expr::Capture(_)
         | Expr::EnumPattern(_, _, _)
         | Expr::FunRef(_)
+        | Expr::GlobalLoad { .. }
         | Expr::TypeValue { .. }
         | Expr::Unknown(_)
         | Expr::Variable(_, _) => {}
@@ -516,6 +522,8 @@ fn visit_operation(operation: &Operation, path: &str, regions: &mut Vec<AstRegio
         | Shr(left, right)
         | And(left, right)
         | Or(left, right)
+        | BitAnd(left, right)
+        | BitOr(left, right)
         | Xor(left, right)
         | Eq(left, right)
         | NotEq(left, right)

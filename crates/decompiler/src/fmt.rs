@@ -804,8 +804,11 @@ impl SupportingDeclarations {
                     self.collect_expr(code, argument, current);
                 }
             }
-            Expr::Closure(reference, statements) => {
+            Expr::Closure(reference, _, captures, statements) => {
                 self.add_function(code, *reference, current);
+                for (_, value) in captures {
+                    self.collect_expr(code, value, current);
+                }
                 self.collect_statements(code, statements, current);
             }
             Expr::EnumConstr(ty, _, arguments) | Expr::EnumPatternBinding(ty, _, arguments) => {
@@ -844,6 +847,10 @@ impl SupportingDeclarations {
             }
             Expr::RuntimeType { value, result_type } | Expr::TypeId { value, result_type } => {
                 self.add_type(code, *result_type, current);
+                self.collect_expr(code, value, current);
+            }
+            Expr::SafeCast { value, target_type } => {
+                self.add_type(code, *target_type, current);
                 self.collect_expr(code, value, current);
             }
             Expr::VirtualClosure {
@@ -926,7 +933,11 @@ impl SupportingDeclarations {
                 }
             }
             Expr::Provenanced { .. } => unreachable!("raw_expression removes provenance"),
-            Expr::Constant(_) | Expr::Unknown(_) | Expr::Variable(_, _) => {}
+            Expr::GlobalLoad { result_type, .. } => {
+                self.runtime = true;
+                self.add_type(code, *result_type, current);
+            }
+            Expr::Constant(_) | Expr::Capture(_) | Expr::Unknown(_) | Expr::Variable(_, _) => {}
         }
     }
 
@@ -946,6 +957,8 @@ impl SupportingDeclarations {
             | Operation::Shr(left, right)
             | Operation::And(left, right)
             | Operation::Or(left, right)
+            | Operation::BitAnd(left, right)
+            | Operation::BitOr(left, right)
             | Operation::Xor(left, right)
             | Operation::Eq(left, right)
             | Operation::NotEq(left, right)
@@ -1231,6 +1244,10 @@ fn fmt_runtime_helpers(out: &mut Formatter<'_>, opts: &FormatOptions) -> fmt::Re
     )?;
     writeln!(
         out,
+        "{nested}public static function getGlobal(index: Int): Dynamic throw 'HashLink global $index requires a runtime binding';"
+    )?;
+    writeln!(
+        out,
         "{nested}public static function getMem(bytes: hl.Bytes, index: Int): Dynamic return null;"
     )?;
     writeln!(
@@ -1403,14 +1420,16 @@ enum ParentExpr {
 const PREC_IF: u8 = 1;
 const PREC_OR: u8 = 2;
 const PREC_AND: u8 = 3;
-const PREC_XOR: u8 = 4;
-const PREC_COMPARE: u8 = 5;
-const PREC_SHIFT: u8 = 6;
-const PREC_ADD: u8 = 7;
-const PREC_MUL: u8 = 8;
-const PREC_UNARY: u8 = 9;
-const PREC_POSTFIX: u8 = 10;
-const PREC_PRIMARY: u8 = 11;
+const PREC_BIT_OR: u8 = 4;
+const PREC_XOR: u8 = 5;
+const PREC_BIT_AND: u8 = 6;
+const PREC_COMPARE: u8 = 7;
+const PREC_SHIFT: u8 = 8;
+const PREC_ADD: u8 = 9;
+const PREC_MUL: u8 = 10;
+const PREC_UNARY: u8 = 11;
+const PREC_POSTFIX: u8 = 12;
+const PREC_PRIMARY: u8 = 13;
 
 fn raw_expression(mut expression: &Expr) -> &Expr {
     while let Expr::Provenanced {
@@ -1442,7 +1461,9 @@ fn operation_precedence(operation: &Operation) -> u8 {
     match operation {
         Operation::Or(..) => PREC_OR,
         Operation::And(..) => PREC_AND,
+        Operation::BitOr(..) => PREC_BIT_OR,
         Operation::Xor(..) => PREC_XOR,
+        Operation::BitAnd(..) => PREC_BIT_AND,
         Operation::Eq(..)
         | Operation::NotEq(..)
         | Operation::Gt(..)
@@ -1609,31 +1630,57 @@ fn fmt_expr(
             fmt_expression_list(out, args, indent, code, function)?;
             out.write_str(")")?;
         }
-        Expr::Closure(reference, statements) => {
+        Expr::Closure(reference, bound_arguments, captures, statements) => {
             if let Some(closure) = reference.as_fn(code) {
+                let closure_indent = if captures.is_empty() {
+                    indent.clone()
+                } else {
+                    out.write_str("{")?;
+                    let nested = indent.inc_nesting();
+                    for (name, value) in captures {
+                        writeln!(out)?;
+                        write!(out, "{nested}var {} = ", escape_identifier(name.as_str()))?;
+                        fmt_expr(out, value, &nested, code, function, ParentExpr::Root)?;
+                        out.write_str(";")?;
+                    }
+                    writeln!(out)?;
+                    write!(out, "{nested}")?;
+                    nested
+                };
                 out.write_str("(")?;
-                for (index, argument) in closure.ty(code).args.iter().enumerate() {
+                for (index, argument) in closure
+                    .ty(code)
+                    .args
+                    .iter()
+                    .skip(*bound_arguments)
+                    .enumerate()
+                {
                     if index > 0 {
                         out.write_str(", ")?;
                     }
+                    let argument_index = index + *bound_arguments;
                     let name = closure
-                        .arg_name(code, index)
+                        .arg_name(code, argument_index)
                         .map(|name| escape_identifier(name.as_str()))
-                        .unwrap_or_else(|| format!("arg{index}"));
+                        .unwrap_or_else(|| format!("__hl_r{argument_index}"));
                     write!(out, "{name}: {}", haxe_type(code, *argument))?;
                 }
                 out.write_str(") -> {")?;
                 if !statements.is_empty() {
                     writeln!(out)?;
-                    let nested = indent.inc_nesting();
+                    let nested = closure_indent.inc_nesting();
                     for statement in statements {
                         write!(out, "{nested}")?;
                         Display::fmt(&statement.display(&nested, code, closure), out)?;
                         writeln!(out)?;
                     }
-                    write!(out, "{indent}")?;
+                    write!(out, "{closure_indent}")?;
                 }
                 out.write_str("}")?;
+                if !captures.is_empty() {
+                    writeln!(out, ";")?;
+                    write!(out, "{indent}}}")?;
+                }
             } else {
                 out.write_str("(cast null : Dynamic)")?;
             }
@@ -1707,6 +1754,17 @@ fn fmt_expr(
         Expr::FunRef(reference) => {
             out.write_str(&function_reference_name(code, function, *reference))?;
         }
+        Expr::GlobalLoad {
+            global,
+            result_type,
+        } => {
+            write!(
+                out,
+                "(cast __HlRuntime.getGlobal({}) : {})",
+                global.0,
+                haxe_type(code, *result_type)
+            )?;
+        }
         Expr::SuperCall(arguments) => {
             out.write_str("super(")?;
             fmt_expression_list(out, arguments, indent, code, function)?;
@@ -1742,6 +1800,11 @@ fn fmt_expr(
                 ParentExpr::Postfix(PREC_POSTFIX),
             )?;
             out.write_str(".kind : Int)")?;
+        }
+        Expr::SafeCast { value, target_type } => {
+            out.write_str("cast(")?;
+            fmt_expr(out, value, indent, code, function, ParentExpr::Root)?;
+            write!(out, ", {})", haxe_type(code, *target_type))?;
         }
         Expr::VirtualClosure {
             receiver, method, ..
@@ -1843,6 +1906,7 @@ fn fmt_expr(
             fmt_expr(out, expression, indent, code, function, ParentExpr::Root)?;
             out.write_str(")")?;
         }
+        Expr::Capture(name) => out.write_str(&escape_identifier(name.as_str()))?,
         Expr::Unknown(message) => {
             write!(
                 out,
@@ -1966,6 +2030,8 @@ fn fmt_operation(
         Operation::Shr(left, right) => binary!(left, ">>", right),
         Operation::And(left, right) => binary!(left, "&&", right),
         Operation::Or(left, right) => binary!(left, "||", right),
+        Operation::BitAnd(left, right) => binary!(left, "&", right),
+        Operation::BitOr(left, right) => binary!(left, "|", right),
         Operation::Xor(left, right) => binary!(left, "^", right),
         Operation::Eq(left, right) => binary!(left, "==", right),
         Operation::NotEq(left, right) => binary!(left, "!=", right),
