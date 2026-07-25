@@ -607,7 +607,7 @@ fn assemble_class(
             .iter()
             .filter(|function| {
                 function.parent == Some(object_type)
-                    && function.name(code).as_str() == "__constructor__"
+                    && function.name(code).as_ref() == "__constructor__"
             })
             .map(|function| (function.findex, false, false)),
     );
@@ -683,7 +683,7 @@ fn method_from_artifact(
     static_: bool,
     dynamic: bool,
 ) -> Method {
-    let constructor = function.name(code).as_str() == "__constructor__";
+    let constructor = function.name(code).as_ref() == "__constructor__";
     Method {
         fun: function.findex,
         static_: static_ && !constructor,

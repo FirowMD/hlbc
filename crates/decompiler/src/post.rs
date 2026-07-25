@@ -95,7 +95,7 @@ pub(crate) fn recover_haxe(
     recover_guarded_array_reads(statements);
     recover_map_literals(code, statements);
     recover_enum_pattern_variables(statements);
-    if function.name(code).as_str() == "__constructor__" {
+    if function.name(code).as_ref() == "__constructor__" {
         move_super_constructor_first(statements);
     }
     rename_overlapping_ssa_locals(statements, ir);
@@ -159,7 +159,7 @@ fn remove_trace_metadata(code: &Bytecode, statements: &mut Vec<Statement>) {
                     field,
                     value,
                 } => {
-                    let Some(field_name) = code.strings.get(field.0).map(|value| value.as_str())
+                    let Some(field_name) = code.strings.get(field.0).map(|value| value.as_ref())
                     else {
                         break;
                     };
@@ -245,7 +245,7 @@ fn is_trace_statement(code: &Bytecode, statement: &Statement) -> bool {
     };
     matches!(
         raw_expr(&call.fun),
-        Expr::FunRef(function) if function.name(code).as_str() == "trace"
+        Expr::FunRef(function) if function.name(code).as_ref() == "trace"
     )
 }
 
@@ -268,7 +268,7 @@ fn rename_state_machine_name_conflicts(statements: &mut [Statement]) {
                     let Some(name) = name else {
                         continue;
                     };
-                    let escaped = escape_identifier(name.as_str());
+                    let escaped = escape_identifier(name.as_ref());
                     match names.get(&escaped).copied() {
                         Some(previous) if previous != register => {
                             renames
@@ -494,7 +494,7 @@ fn collect_assigned_variables(
 
 fn variable_identity(expression: &Expr) -> Option<String> {
     match raw_expr(expression) {
-        Expr::Variable(_, Some(name)) => Some(escape_identifier(name.as_str())),
+        Expr::Variable(_, Some(name)) => Some(escape_identifier(name.as_ref())),
         Expr::Variable(register, None) => Some(format!("__hl_r{}", register.0)),
         _ => None,
     }
@@ -506,7 +506,7 @@ fn prevent_conflicting_redeclarations(
     statements: &mut Vec<Statement>,
 ) {
     let skip_receiver =
-        usize::from(function.is_method() || function.name(code).as_str() == "__constructor__");
+        usize::from(function.is_method() || function.name(code).as_ref() == "__constructor__");
     let mut declared = function
         .ty(code)
         .args
@@ -516,7 +516,7 @@ fn prevent_conflicting_redeclarations(
         .filter_map(|(index, _)| {
             function.arg_name(code, index).map(|name| {
                 (
-                    escape_identifier(name.as_str()),
+                    escape_identifier(name.as_ref()),
                     Reg((index + skip_receiver) as u32),
                 )
             })
@@ -820,7 +820,7 @@ fn is_haxe_map_type(code: &Bytecode, ty: RefType) -> bool {
         return false;
     };
     let name = object.name(code);
-    let name = name.as_str();
+    let name = name.as_ref();
     name.starts_with("haxe.ds.")
         && matches!(
             name.rsplit('.').next(),
@@ -2735,7 +2735,7 @@ mod recovery_tests {
                 matches!(
                     ty,
                     Type::Obj(object) | Type::Struct(object)
-                        if object.name(&code).as_str() == "haxe.ds.StringMap"
+                        if object.name(&code).as_ref() == "haxe.ds.StringMap"
                 )
             })
             .map(RefType)

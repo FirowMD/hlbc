@@ -3,10 +3,10 @@ use std::time::Instant;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::{
-    Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions, STORED,
+    Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions, Value, STORED,
 };
 use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer};
-use tantivy::{doc, Index};
+use tantivy::{doc, Index, TantivyDocument};
 
 use hlbc::types::RefFun;
 use hlbc::Bytecode;
@@ -22,8 +22,9 @@ impl TantivySearcher {
         // let code_tokenizer = TextAnalyzer::from(FunctionTokenizer)
         //     .filter(LowerCaser)
         //     .filter(Stemmer::new(Language::English));
-        let code_tokenizer =
-            TextAnalyzer::from(NgramTokenizer::all_ngrams(3, 10)).filter(LowerCaser);
+        let code_tokenizer = TextAnalyzer::builder(NgramTokenizer::all_ngrams(3, 10).unwrap())
+            .filter(LowerCaser)
+            .build();
 
         let mut schema_builder = Schema::builder();
         let findex = schema_builder.add_u64_field("findex", NumericOptions::default() | STORED);
@@ -67,13 +68,15 @@ impl TantivySearcher {
         let searcher = reader.searcher();
         let parser = QueryParser::for_index(&self.index, vec![Field::from_field_id(1)]);
         let query = parser.parse_query(query_text).unwrap();
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(10)).unwrap();
+        let top_docs = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
         top_docs
             .into_iter()
             .map(|(_, d)| {
                 RefFun(
                     searcher
-                        .doc(d)
+                        .doc::<TantivyDocument>(d)
                         .unwrap()
                         .get_first(Field::from_field_id(0))
                         .unwrap()

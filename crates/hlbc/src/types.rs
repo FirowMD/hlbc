@@ -834,7 +834,7 @@ impl RefFun {
         match code.safe_get_ref_fun(*self) {
             Some(FunPtr::Fun(fun)) => fun.name(code),
             Some(FunPtr::Native(n)) => n.name(code),
-            None => Str::from_static("[invalid function ref]"),
+            None => Str::from_borrowed("[invalid function ref]"),
         }
     }
 

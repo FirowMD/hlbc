@@ -4,7 +4,7 @@ use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
 #[derive(Clone)]
 pub(crate) struct FunctionTokenizer;
 
-struct FunctionTokenStream<'a> {
+pub(crate) struct FunctionTokenStream<'a> {
     /// Remaining text to be tokenized
     text: &'a str,
     /// Global offset at the start of tokenization
@@ -16,7 +16,7 @@ struct FunctionTokenStream<'a> {
 impl Tokenizer for FunctionTokenizer {
     type TokenStream<'a> = FunctionTokenStream<'a>;
 
-    fn token_stream<'a>(&self, text: &'a str) -> Self::TokenStream<'a> {
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
         FunctionTokenStream {
             text,
             offset: 0,
@@ -87,10 +87,10 @@ mod tests {
     #[test]
     fn function_tokenizer_simple() {
         let text = "my_function otherFunction";
-        let tokenizer = FunctionTokenizer;
+        let mut tokenizer = FunctionTokenizer;
         let mut stream = tokenizer.token_stream(text);
         let tokens: Vec<_> = (0..4)
-            .filter_map(|i| stream.next().map(|t| t.text.clone()))
+            .filter_map(|_| stream.next().map(|t| t.text.clone()))
             .collect();
         assert_eq!(tokens.len(), 4);
         assert!(!stream.advance());

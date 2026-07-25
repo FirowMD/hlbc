@@ -350,7 +350,7 @@ fn target_object<'a>(code: &'a Bytecode, fixture: &str) -> Option<&'a TypeObj> {
             if code
                 .strings
                 .get(object.name.0)
-                .is_some_and(|name| name.as_str() == fixture) =>
+                .is_some_and(|name| name.as_ref() == fixture) =>
         {
             Some(object)
         }

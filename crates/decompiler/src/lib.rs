@@ -637,7 +637,7 @@ impl<'c> DecompilerState<'c> {
         }
 
         let is_typed_array = matches!(
-            name.as_str(),
+            name.as_ref(),
             "allocI32" | "allocF64" | "allocF32" | "allocUI16" | "allocBool"
         );
         let is_dynamic_wrapper = name == "alloc"
@@ -657,7 +657,7 @@ impl<'c> DecompilerState<'c> {
                 self.array_temp_regs
                     .extend(builder.temporaries.iter().copied());
                 let element_type = if is_typed_array {
-                    array_element_type_from_name(name.as_str())
+                    array_element_type_from_name(name.as_ref())
                 } else {
                     builder.element_type
                 };
@@ -917,7 +917,7 @@ fn is_recoverable_string_expression(expression: &Expr, code: &Bytecode) -> bool 
     let Expr::FunRef(fun) = call.fun else {
         return false;
     };
-    matches!(fun.name(code).as_str(), "itos" | "__alloc__" | "__add__")
+    matches!(fun.name(code).as_ref(), "itos" | "__alloc__" | "__add__")
 }
 
 fn array_element_type_from_name(name: &str) -> Option<RefType> {
@@ -950,7 +950,7 @@ fn is_array_temporary_statement(
                     Expr::ArrayAlloc { native: true, .. } => true,
                     Expr::Call(call) => matches!(
                         raw_expr(&call.fun),
-                        Expr::FunRef(fun) if fun.name(code).as_str() == "alloc_bytes"
+                        Expr::FunRef(fun) if fun.name(code).as_ref() == "alloc_bytes"
                     ),
                     _ => false,
                 }
@@ -966,7 +966,7 @@ fn is_string_type(code: &Bytecode, ty: RefType) -> bool {
     matches!(
         code.types.get(ty.0),
         Some(Type::Obj(object)) | Some(Type::Struct(object))
-            if object.name(code).as_str() == "String"
+            if object.name(code).as_ref() == "String"
     )
 }
 
@@ -1017,7 +1017,7 @@ fn recover_typed_array_access(bytes: &Expr, index: &Expr) -> Option<Expr> {
     let Expr::Field(array, name) = raw_expr(bytes) else {
         return None;
     };
-    if name.as_str() != "bytes" {
+    if name.as_ref() != "bytes" {
         return None;
     }
     let element_index = match raw_expr(index) {
@@ -1647,7 +1647,7 @@ fn decompile_code_legacy_inner(
                 )));
                 let function_name = fun.name(code);
                 let capture_fields = state.closure_captures.remove(&obj);
-                let anonymous = function_name.is_empty() || function_name.as_str() == "<none>";
+                let anonymous = function_name.is_empty() || function_name.as_ref() == "<none>";
                 if !anonymous && capture_fields.is_none() {
                     state.push_expr(
                         i,
@@ -2650,7 +2650,7 @@ pub fn decompile_function_with_options(
     options: DecompileOptions,
 ) -> Result<Decompiled<Method>, DecompileError> {
     decompile_code_with_options(code, function, options).map(|body| {
-        let constructor = function.name(code).as_str() == "__constructor__";
+        let constructor = function.name(code).as_ref() == "__constructor__";
         body.map(|statements| Method {
             fun: function.findex,
             static_: !constructor && !function.is_method(),
@@ -2745,7 +2745,7 @@ pub fn decompile_class_with_options(
                 .iter()
                 .filter(|function| {
                     function.parent == Some(object_type)
-                        && function.name(code).as_str() == "__constructor__"
+                        && function.name(code).as_ref() == "__constructor__"
                 })
                 .map(|function| (function.findex, false, false)),
         );
@@ -2772,7 +2772,7 @@ pub fn decompile_class_with_options(
                     optimization_traces.extend(traces);
                 }
                 recovery_annotations.extend(body.recovery_annotations);
-                let constructor = function.name(code).as_str() == "__constructor__";
+                let constructor = function.name(code).as_ref() == "__constructor__";
                 methods.push(Method {
                     fun,
                     static_: static_ && !constructor,

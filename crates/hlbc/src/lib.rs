@@ -836,10 +836,10 @@ mod tests {
         let mut bc = Bytecode::default();
         // strings[0] is implicit null; ensure at least some entries
         bc.strings = vec![
-            Str::from_static(""),
-            Str::from_static("A"),
-            Str::from_static("B"),
-            Str::from_static("C"),
+            Str::from_borrowed(""),
+            Str::from_borrowed("A"),
+            Str::from_borrowed("B"),
+            Str::from_borrowed("C"),
         ];
         // Create a function with opcodes that use strings
         let f = Function {
@@ -971,8 +971,8 @@ mod tests {
         // First bytecode with 2 debug files and 1 function
         let mut bc1 = Bytecode::default();
         bc1.debug_files = Some(vec![
-            Str::from_static("file_a.hl"),
-            Str::from_static("file_b.hl"),
+            Str::from_borrowed("file_a.hl"),
+            Str::from_borrowed("file_b.hl"),
         ]);
         let f1 = Function {
             t: RefType(0),
@@ -989,9 +989,9 @@ mod tests {
         // Second bytecode with 3 debug files and 1 function
         let mut bc2 = Bytecode::default();
         bc2.debug_files = Some(vec![
-            Str::from_static("file_c.hl"),
-            Str::from_static("file_d.hl"),
-            Str::from_static("file_e.hl"),
+            Str::from_borrowed("file_c.hl"),
+            Str::from_borrowed("file_d.hl"),
+            Str::from_borrowed("file_e.hl"),
         ]);
         let f2 = Function {
             t: RefType(0),
@@ -1009,11 +1009,11 @@ mod tests {
         let merged = bc1.merge_with(bc2)?;
         let df = merged.debug_files.as_ref().unwrap();
         assert_eq!(df.len(), 5);
-        assert_eq!(df[0], Str::from_static("file_a.hl"));
-        assert_eq!(df[1], Str::from_static("file_b.hl"));
-        assert_eq!(df[2], Str::from_static("file_c.hl"));
-        assert_eq!(df[3], Str::from_static("file_d.hl"));
-        assert_eq!(df[4], Str::from_static("file_e.hl"));
+        assert_eq!(df[0], Str::from_borrowed("file_a.hl"));
+        assert_eq!(df[1], Str::from_borrowed("file_b.hl"));
+        assert_eq!(df[2], Str::from_borrowed("file_c.hl"));
+        assert_eq!(df[3], Str::from_borrowed("file_d.hl"));
+        assert_eq!(df[4], Str::from_borrowed("file_e.hl"));
 
         // The function from bc2 is now at index 1; its file indices should be offset by 2
         let f2_merged = &merged.functions[1];
@@ -1029,13 +1029,13 @@ mod tests {
         // Bytecode 1 with strings: "", A, B, X, M, L, DF
         let mut bc1 = Bytecode::default();
         bc1.strings = vec![
-            Str::from_static(""),
-            Str::from_static("A"),
-            Str::from_static("B"),
-            Str::from_static("X"),
-            Str::from_static("M"),
-            Str::from_static("L"),
-            Str::from_static("DF"),
+            Str::from_borrowed(""),
+            Str::from_borrowed("A"),
+            Str::from_borrowed("B"),
+            Str::from_borrowed("X"),
+            Str::from_borrowed("M"),
+            Str::from_borrowed("L"),
+            Str::from_borrowed("DF"),
         ];
         // TypeObj with name A, field X, proto M
         bc1.types.push(Type::Obj(TypeObj {
@@ -1085,14 +1085,14 @@ mod tests {
         // Bytecode 2 with overlapping strings: "", B, C, X, N, L2, DF, A
         let mut bc2 = Bytecode::default();
         bc2.strings = vec![
-            Str::from_static(""),
-            Str::from_static("B"),
-            Str::from_static("C"),
-            Str::from_static("X"),
-            Str::from_static("N"),
-            Str::from_static("L2"),
-            Str::from_static("DF"),
-            Str::from_static("A"),
+            Str::from_borrowed(""),
+            Str::from_borrowed("B"),
+            Str::from_borrowed("C"),
+            Str::from_borrowed("X"),
+            Str::from_borrowed("N"),
+            Str::from_borrowed("L2"),
+            Str::from_borrowed("DF"),
+            Str::from_borrowed("A"),
         ];
         // TypeObj with name C, field X, proto N
         bc2.types.push(Type::Obj(TypeObj {
@@ -1144,16 +1144,16 @@ mod tests {
 
         // Verify final strings: dedup identical, preserve 0, append new in order seen
         let expected_strings = vec![
-            Str::from_static(""),
-            Str::from_static("A"),
-            Str::from_static("B"),
-            Str::from_static("X"),
-            Str::from_static("M"),
-            Str::from_static("L"),
-            Str::from_static("DF"),
-            Str::from_static("C"),
-            Str::from_static("N"),
-            Str::from_static("L2"),
+            Str::from_borrowed(""),
+            Str::from_borrowed("A"),
+            Str::from_borrowed("B"),
+            Str::from_borrowed("X"),
+            Str::from_borrowed("M"),
+            Str::from_borrowed("L"),
+            Str::from_borrowed("DF"),
+            Str::from_borrowed("C"),
+            Str::from_borrowed("N"),
+            Str::from_borrowed("L2"),
         ];
         assert_eq!(merged.strings, expected_strings);
 
@@ -1299,10 +1299,10 @@ mod tests {
         // bc1: type T with flattened fields [p1, a1]
         let mut bc1 = Bytecode::default();
         bc1.strings = vec![
-            Str::from_static(""),
-            Str::from_static("T"),
-            Str::from_static("p1"),
-            Str::from_static("a1"),
+            Str::from_borrowed(""),
+            Str::from_borrowed("T"),
+            Str::from_borrowed("p1"),
+            Str::from_borrowed("a1"),
         ];
         bc1.types.push(Type::Obj(TypeObj {
             name: RefString(1),
@@ -1340,9 +1340,9 @@ mod tests {
         // bc2: duplicate T with only [a1]
         let mut bc2 = Bytecode::default();
         bc2.strings = vec![
-            Str::from_static(""),
-            Str::from_static("T"),
-            Str::from_static("a1"),
+            Str::from_borrowed(""),
+            Str::from_borrowed("T"),
+            Str::from_borrowed("a1"),
         ];
         bc2.types.push(Type::Obj(TypeObj {
             name: RefString(1),
@@ -1488,7 +1488,7 @@ impl Resolve<RefString> for Bytecode {
         if index.0 > 0 {
             self.strings[index.0].clone()
         } else {
-            Str::from_static("<none>")
+            Str::from_borrowed("<none>")
         }
     }
 }

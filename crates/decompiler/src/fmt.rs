@@ -146,7 +146,7 @@ fn haxe_type_value(code: &Bytecode, ty: &Type, active: &mut BTreeSet<usize>) -> 
         }
         Type::Obj(object) | Type::Struct(object) => {
             let name = code.get(object.name);
-            haxe_named_type(name.as_str())
+            haxe_named_type(name.as_ref())
         }
         Type::Array => HaxeType::NativeArray(Box::new(HaxeType::Dynamic)),
         Type::Type => HaxeType::RuntimeType,
@@ -156,7 +156,7 @@ fn haxe_type_value(code: &Bytecode, ty: &Type, active: &mut BTreeSet<usize>) -> 
                 .iter()
                 .map(|field| {
                     (
-                        escape_identifier(field.name(code).as_str()),
+                        escape_identifier(field.name(code).as_ref()),
                         haxe_type_inner(code, field.t, active),
                     )
                 })
@@ -164,9 +164,9 @@ fn haxe_type_value(code: &Bytecode, ty: &Type, active: &mut BTreeSet<usize>) -> 
         ),
         Type::Abstract { name } => {
             let name = code.get(*name);
-            haxe_abstract_type(name.as_str())
+            haxe_abstract_type(name.as_ref())
         }
-        Type::Enum { name, .. } => HaxeType::Named(source_type_name(code.get(*name).as_str())),
+        Type::Enum { name, .. } => HaxeType::Named(source_type_name(code.get(*name).as_ref())),
         Type::Null(inner) => HaxeType::Nullable(Box::new(haxe_type_inner(code, *inner, active))),
         Type::Packed(inner) => HaxeType::Wrapped(Box::new(haxe_type_inner(code, *inner, active))),
     }
@@ -411,10 +411,10 @@ struct ClassDisplay<'a> {
 
 impl Display for ClassDisplay<'_> {
     fn fmt(&self, out: &mut Formatter<'_>) -> fmt::Result {
-        let class_name = simple_type_name(self.class.name.as_str());
+        let class_name = simple_type_name(self.class.name.as_ref());
         write!(out, "{}class {}", self.opts, class_name)?;
         if let Some(parent) = &self.class.parent {
-            write!(out, " extends {}", source_type_name(parent.as_str()))?;
+            write!(out, " extends {}", source_type_name(parent.as_ref()))?;
         }
         writeln!(out, " {{")?;
         let nested = self.opts.inc_nesting();
@@ -429,7 +429,7 @@ impl Display for ClassDisplay<'_> {
             writeln!(
                 out,
                 "var {}: {};",
-                escape_identifier(field.name.as_str()),
+                escape_identifier(field.name.as_ref()),
                 haxe_type(self.code, field.ty)
             )?;
         }
@@ -503,7 +503,7 @@ impl SupportingDeclarations {
             Type::Obj(object) | Type::Struct(object) => {
                 let name = object.name(code);
                 if !self.current_types.contains(&reference.0)
-                    && should_emit_supporting_type(name.as_str())
+                    && should_emit_supporting_type(name.as_ref())
                 {
                     self.types.insert(reference.0);
                 }
@@ -526,7 +526,7 @@ impl SupportingDeclarations {
                     }
                 }
                 for constructor in code.functions.iter().filter(|function| {
-                    function.name(code).as_str() == "__constructor__"
+                    function.name(code).as_ref() == "__constructor__"
                         && function.ty(code).args.first() == Some(&reference)
                 }) {
                     for argument in &constructor.ty(code).args {
@@ -538,7 +538,7 @@ impl SupportingDeclarations {
             Type::Enum {
                 name, constructs, ..
             } => {
-                if should_emit_supporting_type(code.get(*name).as_str()) {
+                if should_emit_supporting_type(code.get(*name).as_ref()) {
                     self.types.insert(reference.0);
                 }
                 for constructor in constructs {
@@ -562,7 +562,7 @@ impl SupportingDeclarations {
                 }
             }
             Type::Abstract { name } => {
-                if should_emit_supporting_type(code.get(*name).as_str()) {
+                if should_emit_supporting_type(code.get(*name).as_ref()) {
                     self.types.insert(reference.0);
                 }
             }
@@ -585,7 +585,7 @@ impl SupportingDeclarations {
                 self.add_type(code, function.t, current);
                 if let Some(parent) = function.parent {
                     self.add_type(code, parent, current);
-                } else if function.name(code).as_str() != "trace" {
+                } else if function.name(code).as_ref() != "trace" {
                     self.free_functions.insert(reference.0);
                 }
             }
@@ -1041,14 +1041,14 @@ fn fmt_supporting_type(
             writeln!(
                 out,
                 "{opts}enum {} {{",
-                simple_type_name(code.get(*name).as_str())
+                simple_type_name(code.get(*name).as_ref())
             )?;
             let nested = opts.inc_nesting();
             for constructor in constructs {
                 write!(
                     out,
                     "{nested}{}",
-                    escape_identifier(constructor.name(code).as_str())
+                    escape_identifier(constructor.name(code).as_ref())
                 )?;
                 if !constructor.params.is_empty() {
                     out.write_str("(")?;
@@ -1068,7 +1068,7 @@ fn fmt_supporting_type(
             write!(
                 out,
                 "{opts}class {}",
-                simple_type_name(object.name(code).as_str())
+                simple_type_name(object.name(code).as_ref())
             )?;
             if let Some(parent) = object.super_ {
                 write!(out, " extends {}", haxe_type(code, parent))?;
@@ -1079,12 +1079,12 @@ fn fmt_supporting_type(
                 writeln!(
                     out,
                     "{nested}public var {}: {};",
-                    escape_identifier(field.name(code).as_str()),
+                    escape_identifier(field.name(code).as_ref()),
                     haxe_type(code, field.t)
                 )?;
             }
             let constructor = code.functions.iter().find(|function| {
-                function.name(code).as_str() == "__constructor__"
+                function.name(code).as_ref() == "__constructor__"
                     && function.ty(code).args.first() == Some(&reference)
             });
             write!(out, "{nested}public function new(")?;
@@ -1094,7 +1094,7 @@ fn fmt_supporting_type(
             writeln!(out, ") {{}}")?;
             let mut emitted_methods = BTreeSet::new();
             for prototype in &object.protos {
-                let name = escape_identifier(prototype.name(code).as_str());
+                let name = escape_identifier(prototype.name(code).as_ref());
                 if name == "new" || !emitted_methods.insert(name.clone()) {
                     continue;
                 }
@@ -1119,7 +1119,7 @@ fn fmt_supporting_type(
         Type::Abstract { name } => write!(
             out,
             "{opts}typedef {} = Dynamic;",
-            simple_type_name(code.get(*name).as_str())
+            simple_type_name(code.get(*name).as_ref())
         ),
         _ => write!(
             out,
@@ -1181,8 +1181,8 @@ fn fmt_native_externs(
         writeln!(
             out,
             "{nested}@:hlNative(\"{}\", \"{}\")",
-            escape_haxe_string(native.lib(code).as_str(), '"'),
-            escape_haxe_string(native.name(code).as_str(), '"')
+            escape_haxe_string(native.lib(code).as_ref(), '"'),
+            escape_haxe_string(native.name(code).as_ref(), '"')
         )?;
         write!(out, "{nested}public static function f{reference}(")?;
         fmt_signature_arguments(out, code, native.ty(code), 0)?;
@@ -1333,7 +1333,7 @@ impl Display for MethodDisplay<'_> {
         let method_name = if self.method.constructor {
             "new".to_owned()
         } else {
-            escape_identifier(function.name(self.code).as_str())
+            escape_identifier(function.name(self.code).as_ref())
         };
         write!(out, "function {method_name}(")?;
 
@@ -1345,7 +1345,7 @@ impl Display for MethodDisplay<'_> {
             }
             let name = function
                 .arg_name(self.code, position)
-                .map(|name| escape_identifier(name.as_str()))
+                .map(|name| escape_identifier(name.as_ref()))
                 .unwrap_or_else(|| format!("arg{position}"));
             write!(out, "{name}: {}", haxe_type(self.code, *argument))?;
         }
@@ -1517,7 +1517,7 @@ fn fmt_expr(
                     if index > 0 {
                         out.write_str(", ")?;
                     }
-                    write!(out, "{}: ", escape_identifier(field.name(code).as_str()))?;
+                    write!(out, "{}: ", escape_identifier(field.name(code).as_ref()))?;
                     if let Some(value) = values.get(&hlbc::types::RefField(index)) {
                         fmt_expr(out, value, indent, code, function, ParentExpr::Root)?;
                     } else {
@@ -1606,7 +1606,7 @@ fn fmt_expr(
                 Expr::FunRef(reference)
                     if reference
                         .as_fn(code)
-                        .is_some_and(|target| target.name(code).as_str() == "trace")
+                        .is_some_and(|target| target.name(code).as_ref() == "trace")
             ) && call.args.len() == 2;
             if positioned_trace {
                 out.write_str("haxe.Log.trace")?;
@@ -1639,7 +1639,7 @@ fn fmt_expr(
                     let nested = indent.inc_nesting();
                     for (name, value) in captures {
                         writeln!(out)?;
-                        write!(out, "{nested}var {} = ", escape_identifier(name.as_str()))?;
+                        write!(out, "{nested}var {} = ", escape_identifier(name.as_ref()))?;
                         fmt_expr(out, value, &nested, code, function, ParentExpr::Root)?;
                         out.write_str(";")?;
                     }
@@ -1661,7 +1661,7 @@ fn fmt_expr(
                     let argument_index = index + *bound_arguments;
                     let name = closure
                         .arg_name(code, argument_index)
-                        .map(|name| escape_identifier(name.as_str()))
+                        .map(|name| escape_identifier(name.as_ref()))
                         .unwrap_or_else(|| format!("__hl_r{argument_index}"));
                     write!(out, "{name}: {}", haxe_type(code, *argument))?;
                 }
@@ -1739,7 +1739,7 @@ fn fmt_expr(
                 function,
                 ParentExpr::Postfix(PREC_POSTFIX),
             )?;
-            write!(out, ".{}", escape_identifier(name.as_str()))?;
+            write!(out, ".{}", escape_identifier(name.as_ref()))?;
         }
         Expr::DynamicField(receiver, name) => {
             out.write_str("Reflect.field(")?;
@@ -1747,7 +1747,7 @@ fn fmt_expr(
             let name = code
                 .strings
                 .get(name.0)
-                .map(|name| name.as_str())
+                .map(|name| name.as_ref())
                 .unwrap_or("");
             write!(out, ", \"{}\")", escape_haxe_string(name, '"'))?;
         }
@@ -1771,7 +1771,7 @@ fn fmt_expr(
             out.write_str(")")?;
         }
         Expr::SuperMethod { method, args, .. } => {
-            write!(out, "super.{}(", escape_identifier(method.as_str()))?;
+            write!(out, "super.{}(", escape_identifier(method.as_ref()))?;
             fmt_expression_list(out, args, indent, code, function)?;
             out.write_str(")")?;
         }
@@ -1817,7 +1817,7 @@ fn fmt_expr(
                 function,
                 ParentExpr::Postfix(PREC_POSTFIX),
             )?;
-            write!(out, ".{}", escape_identifier(method.as_str()))?;
+            write!(out, ".{}", escape_identifier(method.as_ref()))?;
         }
         Expr::Reference {
             value,
@@ -1906,7 +1906,7 @@ fn fmt_expr(
             fmt_expr(out, expression, indent, code, function, ParentExpr::Root)?;
             out.write_str(")")?;
         }
-        Expr::Capture(name) => out.write_str(&escape_identifier(name.as_str()))?,
+        Expr::Capture(name) => out.write_str(&escape_identifier(name.as_ref()))?,
         Expr::Unknown(message) => {
             write!(
                 out,
@@ -1916,7 +1916,7 @@ fn fmt_expr(
         }
         Expr::Variable(register, name) => {
             if let Some(name) = name {
-                out.write_str(&escape_identifier(name.as_str()))?;
+                out.write_str(&escape_identifier(name.as_ref()))?;
             } else {
                 write!(out, "__hl_r{}", register.0)?;
             }
@@ -1981,7 +1981,7 @@ fn fmt_constant(out: &mut Formatter<'_>, constant: &Constant, code: &Bytecode) -
             let value = code
                 .strings
                 .get(reference.0)
-                .map(|value| value.as_str())
+                .map(|value| value.as_ref())
                 .unwrap_or("");
             write!(out, "\"{}\"", escape_haxe_string(value, '"'))
         }
@@ -2090,7 +2090,7 @@ fn enum_constructor_name(code: &Bytecode, ty: RefType, index: usize) -> String {
     match code.types.get(ty.0) {
         Some(Type::Enum { constructs, .. }) => constructs
             .get(index)
-            .map(|constructor| escape_identifier(constructor.name(code).as_str()))
+            .map(|constructor| escape_identifier(constructor.name(code).as_ref()))
             .unwrap_or_else(|| format!("__InvalidEnumConstructor{index}")),
         _ => format!("__InvalidEnumConstructor{index}"),
     }
@@ -2109,16 +2109,16 @@ fn function_reference_name(
                 return "trace".to_owned();
             }
             if target.parent == current.parent {
-                return escape_identifier(name.as_str());
+                return escape_identifier(name.as_ref());
             }
             if let Some(parent) = target
                 .parent
                 .and_then(|parent| code.types.get(parent.0))
                 .and_then(Type::get_type_obj)
             {
-                let parent_name = source_type_name(parent.name(code).as_str());
+                let parent_name = source_type_name(parent.name(code).as_ref());
                 if !parent_name.is_empty() && !name.is_empty() && name != "<none>" {
-                    return format!("{parent_name}.{}", escape_identifier(name.as_str()));
+                    return format!("{parent_name}.{}", escape_identifier(name.as_ref()));
                 }
             }
             format!("__HlFunctions.f{}", reference.0)
@@ -2276,7 +2276,7 @@ fn fmt_statement(
             let field = code
                 .strings
                 .get(field.0)
-                .map(|field| field.as_str())
+                .map(|field| field.as_ref())
                 .unwrap_or("");
             write!(out, ", \"{}\", ", escape_haxe_string(field, '"'))?;
             fmt_expr(out, value, indent, code, function, ParentExpr::Root)?;
@@ -2747,7 +2747,7 @@ mod tests {
     }
 
     fn variable(register: u32, name: &str) -> Expr {
-        Expr::Variable(Reg(register), Some(name.into()))
+        Expr::Variable(Reg(register), Some(name.to_owned().into()))
     }
 
     fn render(expression: &Expr, code: &Bytecode, function: &Function) -> String {

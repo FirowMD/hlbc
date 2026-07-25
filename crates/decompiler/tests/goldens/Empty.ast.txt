@@ -4,7 +4,9 @@ Class {
             384,
         ),
     ),
-    name: "Empty",
+    name: RefCounted(
+        "Empty",
+    ),
     parent: None,
     fields: [],
     methods: [

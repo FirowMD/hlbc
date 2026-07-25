@@ -1035,7 +1035,7 @@ fn parameter_names(
         || code
             .strings
             .get(function.name.0)
-            .map_or(false, |name| name.as_str() == "__constructor__");
+            .map_or(false, |name| name.as_ref() == "__constructor__");
     let first_named = usize::from(is_this);
     if is_this && parameter_count > 0 {
         result.insert(Reg(0), Some("this".to_owned()));

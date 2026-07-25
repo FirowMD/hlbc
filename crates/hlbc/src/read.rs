@@ -654,7 +654,9 @@ fn read_strings(r: &mut impl Read, nstrings: usize) -> Result<Vec<Str>> {
                 string_data.len()
             )));
         }
-        strings.push(Str::from_ref(from_utf8(&string_data[acc..end - 1])?));
+        strings.push(Str::from_ref_counted(std::sync::Arc::<str>::from(
+            from_utf8(&string_data[acc..end - 1])?,
+        )));
         acc += ssize;
     }
     Ok(strings)
