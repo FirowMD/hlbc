@@ -455,7 +455,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "hlbc"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "byteorder",
  "flexstr",
@@ -471,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "hlbc-decompiler"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fmtools",
  "hlbc",
@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "hlbc-derive"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "hlbc-indexing"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "fuzzy-matcher",
  "hlbc",

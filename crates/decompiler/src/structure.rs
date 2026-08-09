@@ -124,7 +124,7 @@ impl RegionAnalysis {
                 regions.push(Region::Switch(SwitchRegion {
                     header: node,
                     targets: switch_targets.into_values().collect(),
-                    join,
+                    join: cfg.switch_joins.get(&node).copied().or(join),
                 }));
             }
         }

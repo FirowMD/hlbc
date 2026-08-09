@@ -291,12 +291,10 @@ impl<'a> RegionEmitter<'a> {
             if matches!(opcode, Opcode::Switch { .. }) {
                 let join = self
                     .cfg
-                    .normal_post_dominators()
-                    .immediate
+                    .switch_joins
                     .get(&node)
                     .copied()
-                    .flatten()
-                    .ok_or_else(|| format!("switch {node:?} has no normal post-dominator"))?;
+                    .ok_or_else(|| format!("switch {node:?} has no structural join"))?;
                 let arg = self
                     .flat
                     .switch_args
@@ -318,6 +316,11 @@ impl<'a> RegionEmitter<'a> {
                         EdgeKind::SwitchDefault => default_target = Some(edge.to),
                         _ => {}
                     }
+                }
+                if let Some(default_target) = default_target {
+                    // Zero table offsets select the runtime fallthrough path. Omitting labels
+                    // that share that path preserves the behavior without inventing cases.
+                    grouped.remove(&default_target);
                 }
                 let mut cases = Vec::new();
                 for (target, labels) in grouped {

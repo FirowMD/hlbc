@@ -36,13 +36,13 @@ flexstr = { version = "0.11" }
 fuzzy-matcher = "0.3"
 # Advanced formatting functionalities
 fmtools = "0.1"
-hlbc = { version = "0.8", path = "crates/hlbc" }
+hlbc = { version = "0.9", path = "crates/hlbc" }
 # Decompiler
-hlbc-decompiler = { version = "0.8", path = "crates/decompiler" }
+hlbc-decompiler = { version = "0.9", path = "crates/decompiler" }
 # Compile time code generation for hlbc::Opcode
-hlbc-derive = { version = "0.8", path = "crates/derive" }
+hlbc-derive = { version = "0.9", path = "crates/derive" }
 # Search functionality
-hlbc-indexing = { version = "0.8", path = "crates/indexing" }
+hlbc-indexing = { version = "0.9", path = "crates/indexing" }
 image = { version = "0.25", default-features = false, features = ["ico"] }
 memchr = "2"
 indexmap = { version = "2", features = ["serde"] }

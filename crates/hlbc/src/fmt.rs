@@ -814,8 +814,8 @@ impl Opcode {
             Opcode::Trap { exc, offset } => {
                 op!("try {exc} jump to {}", pos + offset + 1)
             }
-            Opcode::EndTrap { exc } => {
-                op!("catch {exc}")
+            Opcode::EndTrap { normal } => {
+                op!("endtrap {normal}")
             }
             Opcode::GetArray { dst, array, index } => {
                 op!("{dst} = {array}[{index}]")

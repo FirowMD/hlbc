@@ -2042,7 +2042,10 @@ mod tests {
         assert_eq!(
             enums
                 .lines()
-                .filter(|line| line.trim_start().starts_with("var b:"))
+                .filter(|line| {
+                    let line = line.trim_start();
+                    line.starts_with("var b:") || line.starts_with("var b =")
+                })
                 .count(),
             1
         );

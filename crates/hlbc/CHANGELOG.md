@@ -7,7 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/Gui-Yom/hlbc/compare/v0.7.0...HEAD)
+## [Unreleased](https://github.com/Gui-Yom/hlbc/compare/v0.9.0...HEAD)
+
+## [0.9.0](https://github.com/Gui-Yom/hlbc/compare/v0.7.0...v0.9.0) - 2026-08-09
 
 ### Added
 
@@ -15,6 +17,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Usage analysis
 - File analysis
 - Load bytecode when embedded in other files like executables
+
+### Fixed
+
+- Match HashLink's full negative four-byte variable-index range.
+- Model `EndTrap`'s operand as the compiler's boolean normal-exit marker.
+- Keep enum constructor references local when merging bytecode modules.
+- Apply type-field mutations to the serialized own-field list.
 
 ## [0.7.0](https://github.com/Gui-Yom/hlbc/compare/v0.6.1...v0.7.0) - 2023-11-16
 

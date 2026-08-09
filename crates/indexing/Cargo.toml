@@ -1,6 +1,6 @@
 [package]
 name = "hlbc-indexing"
-version = "0.8.0"
+version = "0.9.0"
 rust-version = "1.64"
 description = "Hashlink bytecode indexer"
 keywords = ["hashlink", "bytecode", "haxe", "disassembler", "reverse-enginneering"]

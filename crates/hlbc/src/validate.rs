@@ -1065,7 +1065,7 @@ fn validate_opcode(
             reg(*exc)?;
             validate_jump(function, opcode_index, *offset, "trap", enforce_semantics)
         }
-        Opcode::EndTrap { exc } => reg(*exc),
+        Opcode::EndTrap { .. } => Ok(()),
         Opcode::GetI8 { dst, bytes, index }
         | Opcode::GetI16 { dst, bytes, index }
         | Opcode::GetMem { dst, bytes, index } => regs(&[*dst, *bytes, *index]),

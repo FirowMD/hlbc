@@ -2,7 +2,7 @@
 //!
 //! Extensions should import from [`crate::api::v1`] rather than relying on crate-internal
 //! module layout. Additive fields may still be introduced, but existing v1
-//! names and behavioral contracts are retained for the 0.8 release line.
+//! names and behavioral contracts are retained for the 0.9 release line.
 
 use serde::Serialize;
 

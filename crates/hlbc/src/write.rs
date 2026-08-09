@@ -344,7 +344,7 @@ pub(crate) fn write_var(w: &mut impl Write, value: i32) -> Result<()> {
         if value < 0x2000 {
             w.write_u8(((value >> 8) | 0xA0) as u8)?;
             w.write_u8((value & 0xFF) as u8)?;
-        } else if value < 20000000 {
+        } else if value < 0x20000000 {
             w.write_u8(((value >> 24) | 0xE0) as u8)?;
             w.write_u8(((value >> 16) & 0xFF) as u8)?;
             w.write_u8(((value >> 8) & 0xFF) as u8)?;
@@ -352,7 +352,7 @@ pub(crate) fn write_var(w: &mut impl Write, value: i32) -> Result<()> {
         } else {
             return Err(Error::ValueOutOfBounds {
                 value,
-                limit: 20000000,
+                limit: 0x20000000,
             });
         }
     } else if value < 0x80 {
@@ -368,7 +368,7 @@ pub(crate) fn write_var(w: &mut impl Write, value: i32) -> Result<()> {
     } else {
         return Err(Error::ValueOutOfBounds {
             value,
-            limit: 20000000,
+            limit: 0x20000000,
         });
     }
     Ok(())
@@ -429,8 +429,33 @@ fn flush_repeat(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Cursor;
 
-    use crate::Bytecode;
+    use crate::{Bytecode, Error};
+
+    use super::write_var;
+
+    #[test]
+    fn negative_four_byte_varints_use_hashlink_range() {
+        for value in [-20_000_000, -0x1FFF_FFFF] {
+            let mut encoded = Vec::new();
+            write_var(&mut encoded, value).unwrap();
+            assert_eq!(encoded.len(), 4);
+            assert_eq!(
+                crate::read::read_vari(&mut Cursor::new(encoded)).unwrap(),
+                value
+            );
+        }
+
+        let error = write_var(&mut Vec::new(), -0x2000_0000).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::ValueOutOfBounds {
+                value: 0x2000_0000,
+                limit: 0x2000_0000
+            }
+        ));
+    }
 
     #[test]
     fn ser_eq_deser() {

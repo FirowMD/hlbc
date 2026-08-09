@@ -171,7 +171,7 @@ impl AdjustReferences for EnumConstruct {
 pub struct RefEnumConstruct(pub usize);
 
 impl RefEnumConstruct {
-    /// Adjust the enum construct reference by an offset
+    /// Adjust the construct index within the same enum type.
     pub fn adjust(&mut self, offset: usize) {
         self.0 += offset;
     }
@@ -349,25 +349,28 @@ impl Type {
         }
     }
 
-    /// Replace the fields of an object or struct type.
+    /// Replace the serialized fields defined by an object or struct type.
+    /// Call [`Bytecode::rebuild_derived_data`] afterwards to refresh flattened fields.
     pub fn set_fields(&mut self, fields: Vec<ObjField>) {
         if let Some(obj) = self.get_type_obj_mut() {
-            obj.fields = fields;
+            obj.own_fields = fields;
         }
     }
 
-    /// Add a new field to an object or struct type.
+    /// Add a serialized field defined by an object or struct type.
+    /// Call [`Bytecode::rebuild_derived_data`] afterwards to refresh flattened fields.
     pub fn add_field(&mut self, field: ObjField) {
         if let Some(obj) = self.get_type_obj_mut() {
-            obj.fields.push(field);
+            obj.own_fields.push(field);
         }
     }
 
-    /// Remove a field by index from an object or struct type.
+    /// Remove a serialized field defined by an object or struct type.
+    /// Call [`Bytecode::rebuild_derived_data`] afterwards to refresh flattened fields.
     pub fn remove_field(&mut self, index: usize) -> Option<ObjField> {
         if let Some(obj) = self.get_type_obj_mut() {
-            if index < obj.fields.len() {
-                return Some(obj.fields.remove(index));
+            if index < obj.own_fields.len() {
+                return Some(obj.own_fields.remove(index));
             }
         }
         None
@@ -397,11 +400,14 @@ impl Type {
         None
     }
 
-    /// Set the name of an object, struct, or abstract type.
+    /// Set the name of an object, struct, abstract, or enum type.
     pub fn set_name(&mut self, name: RefString) {
         match self {
             Type::Obj(obj) | Type::Struct(obj) => obj.name = name,
-            Type::Abstract { name: ref mut n } => *n = name,
+            Type::Abstract { name: ref mut n }
+            | Type::Enum {
+                name: ref mut n, ..
+            } => *n = name,
             _ => {}
         }
     }
@@ -924,5 +930,56 @@ pub struct ConstantDef {
 impl AdjustReferences for ConstantDef {
     fn adjust_references(&mut self, mapping: &IndexMapping) {
         self.global.adjust(mapping.global_offset);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field(name: usize, ty: usize) -> ObjField {
+        ObjField {
+            name: RefString(name),
+            t: RefType(ty),
+        }
+    }
+
+    #[test]
+    fn object_field_mutators_change_serialized_own_fields() {
+        let cached_parent_field = field(1, 1);
+        let mut ty = Type::Obj(TypeObj {
+            name: RefString(2),
+            super_: Some(RefType(7)),
+            global: RefGlobal(0),
+            own_fields: vec![field(3, 3)],
+            protos: vec![],
+            bindings: IndexMap::new(),
+            fields: vec![cached_parent_field.clone(), field(3, 3)],
+        });
+
+        ty.set_fields(vec![field(4, 4)]);
+        ty.add_field(field(5, 5));
+        assert_eq!(ty.remove_field(0), Some(field(4, 4)));
+
+        let object = ty.get_type_obj().unwrap();
+        assert_eq!(object.own_fields, vec![field(5, 5)]);
+        assert_eq!(object.fields[0], cached_parent_field);
+    }
+
+    #[test]
+    fn set_name_includes_enum_types() {
+        let mut ty = Type::Enum {
+            name: RefString(1),
+            global: RefGlobal(0),
+            constructs: vec![],
+        };
+        ty.set_name(RefString(9));
+        assert!(matches!(
+            ty,
+            Type::Enum {
+                name: RefString(9),
+                ..
+            }
+        ));
     }
 }

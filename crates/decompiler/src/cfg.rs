@@ -84,6 +84,9 @@ pub struct ControlFlowGraph {
     pub instruction_count: usize,
     pub blocks: Vec<BasicBlock>,
     pub edges: Vec<Edge>,
+    /// Structural join encoded by the `end` operand of each switch header.
+    /// This is metadata emitted by the Haxe compiler, not a runtime edge.
+    pub switch_joins: BTreeMap<NodeId, NodeId>,
     pub exception_regions: Vec<ExceptionRegion>,
     pub unreachable_instructions: Vec<usize>,
     pub irreducible_regions: Vec<FallbackRegion>,
@@ -309,6 +312,7 @@ impl ControlFlowGraph {
             });
         }
 
+        let mut switch_joins = BTreeMap::new();
         for block in &blocks {
             let from = NodeId::Block(block.id);
             let opcode_index = block.end - 1;
@@ -341,13 +345,17 @@ impl ControlFlowGraph {
                             );
                         }
                         add(
+                            node_for_target(switch_target(function_index, len, opcode_index, 0)?)?,
+                            EdgeKind::SwitchDefault,
+                        );
+                        switch_joins.insert(
+                            from,
                             node_for_target(switch_target(
                                 function_index,
                                 len,
                                 opcode_index,
                                 *end,
                             )?)?,
-                            EdgeKind::SwitchDefault,
                         );
                     }
                     Opcode::Ret { .. } => add(NodeId::Exit, EdgeKind::Return),
@@ -387,6 +395,7 @@ impl ControlFlowGraph {
             instruction_count: len,
             blocks,
             edges,
+            switch_joins,
             exception_regions,
             unreachable_instructions,
             irreducible_regions: Vec::new(),
@@ -584,9 +593,26 @@ impl ControlFlowGraph {
                             self.function_index,
                             self.instruction_count,
                             opcode_index,
-                            *end,
+                            0,
                         )?;
                         expected.insert((node_for_target(target)?, EdgeKind::SwitchDefault));
+                        let join = switch_target(
+                            self.function_index,
+                            self.instruction_count,
+                            opcode_index,
+                            *end,
+                        )?;
+                        let join = node_for_target(join)?;
+                        if self.switch_joins.get(&from) != Some(&join) {
+                            return Err(CfgError::new(
+                                self.function_index,
+                                opcode_index,
+                                format!(
+                                    "switch structural join is {:?}, expected {join:?}",
+                                    self.switch_joins.get(&from)
+                                ),
+                            ));
+                        }
                     }
                     Opcode::Ret { .. } => {
                         expected.insert((NodeId::Exit, EdgeKind::Return));
@@ -1123,6 +1149,41 @@ mod tests {
     }
 
     #[test]
+    fn switch_default_falls_through_and_end_is_only_a_boundary() {
+        let graph = ControlFlowGraph::build(&function(vec![
+            Opcode::Switch {
+                reg: Reg(0),
+                offsets: vec![2],
+                end: 4,
+            },
+            Opcode::Nop,
+            Opcode::Nop,
+            Opcode::Ret { ret: Reg(0) },
+            Opcode::Nop,
+            Opcode::Ret { ret: Reg(0) },
+        ]))
+        .unwrap();
+        let switch = block_at(&graph, 0);
+        assert!(graph.edges.iter().any(|edge| {
+            edge.from == switch
+                && edge.to == block_at(&graph, 1)
+                && edge.kind == EdgeKind::SwitchDefault
+        }));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.from == switch
+                && edge.to == block_at(&graph, 3)
+                && edge.kind == EdgeKind::SwitchCase(0)
+        }));
+        assert!(!graph.edges.iter().any(|edge| {
+            edge.from == switch
+                && edge.to == block_at(&graph, 5)
+                && edge.kind == EdgeKind::SwitchDefault
+        }));
+        assert_eq!(graph.switch_joins[&switch], block_at(&graph, 5));
+        graph.verify().unwrap();
+    }
+
+    #[test]
     fn trap_region_has_exception_edges() {
         let graph = ControlFlowGraph::build(&function(vec![
             Opcode::Trap {
@@ -1130,7 +1191,7 @@ mod tests {
                 offset: 3,
             },
             Opcode::NullCheck { reg: Reg(0) },
-            Opcode::EndTrap { exc: Reg(1) },
+            Opcode::EndTrap { normal: true },
             Opcode::JAlways { offset: 1 },
             Opcode::Nop,
             Opcode::Ret { ret: Reg(0) },
@@ -1154,7 +1215,7 @@ mod tests {
                 offset: 3,
             },
             Opcode::NullCheck { reg: Reg(0) },
-            Opcode::EndTrap { exc: Reg(2) },
+            Opcode::EndTrap { normal: true },
             Opcode::JAlways { offset: 1 },
             Opcode::Nop,
             Opcode::Ret { ret: Reg(0) },
@@ -1179,7 +1240,7 @@ mod tests {
                 global: hlbc::types::RefGlobal(7),
             },
             Opcode::Nop,
-            Opcode::EndTrap { exc: Reg(1) },
+            Opcode::EndTrap { normal: true },
             Opcode::JAlways { offset: 1 },
             Opcode::Nop,
             Opcode::Ret { ret: Reg(0) },
@@ -1203,11 +1264,11 @@ mod tests {
                 offset: 3,
             },
             Opcode::NullCheck { reg: Reg(0) },
-            Opcode::EndTrap { exc: Reg(2) },
+            Opcode::EndTrap { normal: true },
             Opcode::JAlways { offset: 2 },
             Opcode::NullCheck { reg: Reg(0) },
             Opcode::JAlways { offset: 0 },
-            Opcode::EndTrap { exc: Reg(1) },
+            Opcode::EndTrap { normal: true },
             Opcode::JAlways { offset: 2 },
             Opcode::Nop,
             Opcode::JAlways { offset: 0 },
@@ -1238,7 +1299,7 @@ mod tests {
                 offset: 4,
             },
             Opcode::NullCheck { reg: Reg(0) },
-            Opcode::EndTrap { exc: Reg(1) },
+            Opcode::EndTrap { normal: true },
             Opcode::NullCheck { reg: Reg(0) },
             Opcode::JAlways { offset: 1 },
             Opcode::Nop,

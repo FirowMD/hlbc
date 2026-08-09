@@ -355,7 +355,7 @@ pub const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
         &[PossibleException::NullReference]
     ), // NullCheck
     semantic!(&[], &["exc"], &[SideEffect::ExceptionState], TrapSetup, &[]), // Trap
-    semantic!(&["exc"], &[], &[SideEffect::ExceptionState], TrapEnd, &[]), // EndTrap
+    semantic!(&[], &[], &[SideEffect::ExceptionState], TrapEnd, &[]), // EndTrap
     semantic!(
         &["bytes", "index"],
         &["dst"],
@@ -1071,8 +1071,10 @@ pub enum Opcode {
         exc: Reg,
     },
     /// Select a jump offset based on the integer value. The offsets array is no bigger than 255.
+    /// Values outside the table fall through to the next opcode. `end` marks the opcode after
+    /// the complete switch construct for structural analysis; the runtime does not jump to it.
     ///
-    /// `jump by offsets[reg] else jump by end`
+    /// `jump by offsets[reg] else fall through`
     Switch {
         reg: Reg,
         offsets: Vec<SwitchOffset>,
@@ -1089,9 +1091,11 @@ pub enum Opcode {
         exc: Reg,
         offset: JumpOffset,
     },
-    /// End the **latest** trap section.
+    /// End the **latest** trap section. `normal` distinguishes the usual end of the try body
+    /// from cleanup emitted before an early return, break, or continue. HashLink's JIT does not
+    /// otherwise inspect this marker.
     EndTrap {
-        exc: Reg,
+        normal: InlineBool,
     },
     /// Read an **i8** from a byte array.
     ///
@@ -1302,7 +1306,8 @@ mod test {
     use std::io::Cursor;
 
     use crate::opcodes::{Opcode, OPCODE_SEMANTICS};
-    use crate::types::Reg;
+    use crate::types::{RefEnumConstruct, Reg};
+    use crate::{AdjustReferences, IndexMapping};
 
     #[test]
     fn test_doc() {
@@ -1448,6 +1453,40 @@ mod test {
         }
         Ok(())
     }
+
+    #[test]
+    fn enum_construct_references_are_type_local_during_merge() {
+        let mut opcode = Opcode::MakeEnum {
+            dst: Reg(0),
+            construct: RefEnumConstruct(2),
+            args: vec![],
+        };
+        opcode.adjust_references(&IndexMapping {
+            type_offset: 17,
+            ..IndexMapping::default()
+        });
+        assert!(matches!(
+            opcode,
+            Opcode::MakeEnum {
+                construct: RefEnumConstruct(2),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn end_trap_operand_is_a_boolean_marker_not_a_register() -> crate::Result<()> {
+        for normal in [false, true] {
+            let opcode = Opcode::EndTrap { normal };
+            let mut bytes = Vec::new();
+            opcode.write(&mut bytes)?;
+            assert_eq!(bytes.last(), Some(&(normal as u8)));
+            assert_eq!(Opcode::read(&mut Cursor::new(bytes))?, opcode);
+            assert!(opcode.metadata().semantics.reads.is_empty());
+            assert!(opcode.metadata().semantics.writes.is_empty());
+        }
+        Ok(())
+    }
 }
 
 impl AdjustReferences for Opcode {
@@ -1499,13 +1538,6 @@ impl AdjustReferences for Opcode {
             // Dynamic field access
             Opcode::DynGet { field, .. } | Opcode::DynSet { field, .. } => {
                 mapping.apply_string(field);
-            }
-
-            // Enum operations
-            Opcode::MakeEnum { construct, .. }
-            | Opcode::EnumAlloc { construct, .. }
-            | Opcode::EnumField { construct, .. } => {
-                construct.adjust(mapping.type_offset); // EnumConstruct indexes are part of type system
             }
 
             Opcode::SetEnumField { field, .. } => {
