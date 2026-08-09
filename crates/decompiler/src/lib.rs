@@ -2405,7 +2405,7 @@ pub fn decompile_code_with_options(
     options: DecompileOptions,
 ) -> Result<Decompiled<Vec<Statement>>, DecompileError> {
     let function_index = hashlink_function_index(function);
-    if let Err(error) = code.validate_function(function) {
+    if let Err(error) = code.validate_function_references(function) {
         let diagnostics = vec![Diagnostic::fatal(
             function_index,
             format!("invalid decompiler input: {error}"),
@@ -3187,10 +3187,10 @@ mod tests {
                     offset: 7,
                 },
                 Opcode::Catch {
-                    offset: catch_globals[0],
+                    global: hlbc::types::RefGlobal(catch_globals[0] as usize),
                 },
                 Opcode::Catch {
-                    offset: catch_globals[1],
+                    global: hlbc::types::RefGlobal(catch_globals[1] as usize),
                 },
                 Opcode::NullCheck { reg: Reg(0) },
                 Opcode::EndTrap { exc: Reg(1) },

@@ -1,4 +1,3 @@
-use std::ffi::CString;
 use std::io::Write;
 
 use byteorder::{LittleEndian, WriteBytesExt};
@@ -11,21 +10,26 @@ impl Bytecode {
     /// Serialize the bytecode to any sink.
     /// Bytecode is serialized to the same format.
     pub fn serialize(&self, w: &mut impl Write) -> Result<()> {
+        self.validate()?;
         w.write_all(&[b'H', b'L', b'B'])?;
         w.write_u8(self.version)?;
         write_var(w, if self.debug_files.is_some() { 1 } else { 0 })?;
         write_var(w, self.ints.len() as i32)?;
         write_var(w, self.floats.len() as i32)?;
         write_var(w, self.strings.len() as i32)?;
-        if let Some((_, pos)) = &self.bytes {
-            write_var(w, pos.len() as i32)?;
+        if self.version >= 5 {
+            write_count(
+                w,
+                self.bytes.as_ref().map_or(0, |(_, pos)| pos.len()),
+                "bytes",
+            )?;
         }
         write_var(w, self.types.len() as i32)?;
         write_var(w, self.globals.len() as i32)?;
         write_var(w, self.natives.len() as i32)?;
         write_var(w, self.functions.len() as i32)?;
-        if let Some(constants) = &self.constants {
-            write_var(w, constants.len() as i32)?;
+        if self.version >= 4 {
+            write_count(w, self.constants.as_ref().map_or(0, Vec::len), "constant")?;
         }
         self.entrypoint.write(w)?;
         for &i in &self.ints {
@@ -35,8 +39,17 @@ impl Bytecode {
             w.write_f64::<LittleEndian>(f)?;
         }
         write_strings(w, &self.strings)?;
-        if let Some((bytes, pos)) = &self.bytes {
-            w.write_i32::<LittleEndian>(bytes.len() as i32)?;
+        if self.version >= 5 {
+            let (bytes, pos) = self
+                .bytes
+                .as_ref()
+                .map_or((&[][..], &[][..]), |(b, p)| (b.as_slice(), p.as_slice()));
+            let byte_len = i32::try_from(bytes.len()).map_err(|_| Error::CountLimit {
+                kind: "bytes blob",
+                count: bytes.len(),
+                limit: i32::MAX as usize,
+            })?;
+            w.write_i32::<LittleEndian>(byte_len)?;
             w.write_all(bytes)?;
             for &p in pos {
                 write_var(w, p as i32)?;
@@ -56,7 +69,7 @@ impl Bytecode {
             n.write(w)?;
         }
         for f in &self.functions {
-            f.write(w)?;
+            f.write(w, self.debug_files.is_some(), self.version)?;
         }
         if let Some(constants) = &self.constants {
             for c in constants {
@@ -118,7 +131,12 @@ impl ObjField {
 
 impl TypeFun {
     pub(crate) fn write(&self, w: &mut impl Write) -> Result<()> {
-        w.write_u8(self.args.len() as u8)?;
+        let count = u8::try_from(self.args.len()).map_err(|_| Error::CountLimit {
+            kind: "function argument",
+            count: self.args.len(),
+            limit: u8::MAX as usize,
+        })?;
+        w.write_u8(count)?;
         for arg in &self.args {
             arg.write(w)?;
         }
@@ -222,6 +240,7 @@ impl Type {
                 w.write_u8(22)?;
                 inner.write(w)?;
             }
+            Type::Guid => w.write_u8(23)?,
         }
         Ok(())
     }
@@ -237,7 +256,7 @@ impl Native {
 }
 
 impl Function {
-    pub(crate) fn write(&self, w: &mut impl Write) -> Result<()> {
+    pub(crate) fn write(&self, w: &mut impl Write, has_debug: bool, version: u8) -> Result<()> {
         self.t.write(w)?;
         self.findex.write(w)?;
         write_var(w, self.regs.len() as i32)?;
@@ -249,7 +268,13 @@ impl Function {
             o.write(w)?;
         }
         // https://github.com/HaxeFoundation/haxe/blob/ea57ab1ef60d212228c8657b7bc5b1085c62714e/src/generators/genhl.ml#L3910
-        if let Some(debug_info) = &self.debug_info {
+        if has_debug {
+            let debug_info = self.debug_info.as_ref().ok_or_else(|| {
+                Error::MalformedBytecode(format!(
+                    "Function {} is missing debug information",
+                    self.findex.0
+                ))
+            })?;
             let mut curfile: i32 = -1;
             let mut curpos = 0;
             let mut rcount = 0;
@@ -280,7 +305,13 @@ impl Function {
             let old_curpos = curpos;
             flush_repeat(w, &mut curpos, &mut rcount, old_curpos)?;
         }
-        if let Some(assigns) = &self.assigns {
+        if has_debug && version >= 3 {
+            let assigns = self.assigns.as_ref().ok_or_else(|| {
+                Error::MalformedBytecode(format!(
+                    "Function {} is missing debug assignments",
+                    self.findex.0
+                ))
+            })?;
             write_var(w, assigns.len() as i32)?;
             for (s, p) in assigns {
                 s.write(w)?;
@@ -306,7 +337,10 @@ impl ConstantDef {
 /// Write an index with a variable size encoding
 pub(crate) fn write_var(w: &mut impl Write, value: i32) -> Result<()> {
     if value < 0 {
-        let value = -value;
+        let value = value.checked_abs().ok_or(Error::ValueOutOfBounds {
+            value,
+            limit: 0x20000000,
+        })?;
         if value < 0x2000 {
             w.write_u8(((value >> 8) | 0xA0) as u8)?;
             w.write_u8((value & 0xFF) as u8)?;
@@ -341,26 +375,32 @@ pub(crate) fn write_var(w: &mut impl Write, value: i32) -> Result<()> {
 }
 
 pub(crate) fn write_strings(w: &mut impl Write, strings: &[Str]) -> Result<()> {
-    let cstr: Vec<CString> = strings
-        .iter()
-        .filter_map(|s| {
-            let bytes: Vec<u8> = s.as_bytes().iter().copied().filter(|&b| b != 0).collect();
-            CString::new(bytes).ok()
-        })
-        .collect();
-    let size = cstr
-        .iter()
-        .map(|s| s.as_bytes_with_nul().len())
-        .reduce(|acc, len| acc + len)
-        .unwrap_or(0);
-    w.write_i32::<LittleEndian>(size as i32)?;
-    for s in cstr.iter() {
-        w.write_all(s.as_bytes_with_nul())?;
+    let size = strings.iter().try_fold(0usize, |size, string| {
+        size.checked_add(string.len() + 1)
+            .ok_or(Error::ValueOutOfBounds {
+                value: i32::MAX,
+                limit: i32::MAX as u32,
+            })
+    })?;
+    let size = i32::try_from(size).map_err(|_| Error::ValueOutOfBounds {
+        value: i32::MAX,
+        limit: i32::MAX as u32,
+    })?;
+    w.write_i32::<LittleEndian>(size)?;
+    for string in strings {
+        w.write_all(string.as_bytes())?;
+        w.write_all(&[0])?;
     }
-    for s in cstr.iter() {
-        write_var(w, s.as_bytes().len() as i32)?;
+    for string in strings {
+        write_count(w, string.len(), "string byte")?;
     }
     Ok(())
+}
+
+pub(crate) fn write_count(w: &mut impl Write, value: usize, kind: &'static str) -> Result<()> {
+    let value = i32::try_from(value)
+        .map_err(|_| Error::MalformedBytecode(format!("{kind} count {value} cannot be encoded")))?;
+    write_var(w, value)
 }
 
 // Adapted from https://github.com/HaxeFoundation/haxe/blob/ea57ab1ef60d212228c8657b7bc5b1085c62714e/src/generators/genhl.ml#L3895
@@ -392,10 +432,8 @@ mod tests {
 
     use crate::Bytecode;
 
-    //#[test]
+    #[test]
     fn ser_eq_deser() {
-        // FIXME this test fails because we are not generating the same bytecode after deserialization
-        // This has to do with non deterministic hashing because we store some things in HashMap (fields ?)
         let data = fs::read("../../data/Anonymous.hl").unwrap();
         // Deserialize
         let code = Bytecode::deserialize(&mut data.as_slice()).unwrap();
@@ -408,7 +446,7 @@ mod tests {
         assert_eq!(data, out);
     }
 
-    //#[test]
+    #[test]
     fn ser_eq_deser_all() {
         for entry in fs::read_dir("../../data").unwrap() {
             let path = entry.unwrap().path();
@@ -419,11 +457,8 @@ mod tests {
                     let mut out = Vec::with_capacity(data.len());
                     code.serialize(&mut out).unwrap();
                     let new = Bytecode::deserialize(&mut out.as_slice()).unwrap();
-                    fs::write("original.txt", format!("{:#?}", code)).unwrap();
-                    fs::write("new.txt", format!("{:#?}", new)).unwrap();
                     assert_eq!(data, out);
-                    //assert_eq!(code, new);
-                    break;
+                    assert_eq!(code.version, new.version);
                 }
             }
         }

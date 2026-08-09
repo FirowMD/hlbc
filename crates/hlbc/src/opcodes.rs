@@ -1,6 +1,6 @@
 use crate::types::{
     InlineBool, InlineInt, JumpOffset, RefBytes, RefEnumConstruct, RefField, RefFloat, RefFun,
-    RefGlobal, RefInt, RefString, RefType, Reg,
+    RefGlobal, RefInt, RefString, RefType, Reg, SwitchOffset,
 };
 use crate::{AdjustReferences, IndexMapping};
 use serde::{Deserialize, Serialize};
@@ -1075,8 +1075,8 @@ pub enum Opcode {
     /// `jump by offsets[reg] else jump by end`
     Switch {
         reg: Reg,
-        offsets: Vec<JumpOffset>,
-        end: JumpOffset,
+        offsets: Vec<SwitchOffset>,
+        end: SwitchOffset,
     },
     /// Throw an exception if *reg* is null.
     ///
@@ -1293,7 +1293,7 @@ pub enum Opcode {
     /// HashLink declares its wire operand with the `J` encoding, but the value
     /// is a global type-object index rather than a CFG branch displacement.
     Catch {
-        offset: JumpOffset,
+        global: RefGlobal,
     },
 }
 
@@ -1475,7 +1475,9 @@ impl AdjustReferences for Opcode {
             }
 
             // Global access
-            Opcode::GetGlobal { global, .. } | Opcode::SetGlobal { global, .. } => {
+            Opcode::GetGlobal { global, .. }
+            | Opcode::SetGlobal { global, .. }
+            | Opcode::Catch { global } => {
                 global.adjust(mapping.global_offset);
             }
 

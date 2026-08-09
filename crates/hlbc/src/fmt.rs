@@ -105,6 +105,7 @@ impl Display for Type {
                     Method(_) => "<method>",
                     Struct(_) => "<struct>",
                     Packed(reftype) => "packed<"{ reftype }">",
+                    Guid => "guid",
                 }
             }
         )
@@ -880,7 +881,7 @@ impl Opcode {
 
 #[cfg(test)]
 mod test {
-    use std::fmt::{Display, Write};
+    use std::fmt::Write;
     use std::fs;
     use std::path::Path;
 
@@ -892,7 +893,7 @@ mod test {
     struct Null;
 
     impl Write for Null {
-        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        fn write_str(&mut self, _s: &str) -> std::fmt::Result {
             Ok(())
         }
     }

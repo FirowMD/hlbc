@@ -125,6 +125,24 @@ fn jump_target(
     }
 }
 
+fn switch_target(
+    function_index: usize,
+    instruction_count: usize,
+    opcode_index: usize,
+    offset: u32,
+) -> Result<usize, CfgError> {
+    let target = opcode_index as u64 + 1 + offset as u64;
+    if target > instruction_count as u64 {
+        Err(CfgError::new(
+            function_index,
+            opcode_index,
+            format!("switch offset {offset} targets {target}, outside 0..={instruction_count}"),
+        ))
+    } else {
+        Ok(target as usize)
+    }
+}
+
 fn branch_offset(opcode: &Opcode) -> Option<i32> {
     match opcode {
         Opcode::JTrue { offset, .. }
@@ -182,9 +200,9 @@ impl ControlFlowGraph {
                 }
                 Opcode::Switch { offsets, end, .. } => {
                     for offset in offsets {
-                        boundaries.insert(jump_target(function_index, len, index, *offset)?);
+                        boundaries.insert(switch_target(function_index, len, index, *offset)?);
                     }
-                    boundaries.insert(jump_target(function_index, len, index, *end)?);
+                    boundaries.insert(switch_target(function_index, len, index, *end)?);
                 }
                 Opcode::Trap { exc, offset } => {
                     // Keep operations before the trap outside the protected
@@ -195,11 +213,9 @@ impl ControlFlowGraph {
                     let mut start = index + 1;
                     let mut catch_opcodes = Vec::new();
                     let mut catch_globals = Vec::new();
-                    while let Some(Opcode::Catch { offset }) = function.ops.get(start) {
+                    while let Some(Opcode::Catch { global }) = function.ops.get(start) {
                         catch_opcodes.push(start);
-                        if *offset >= 0 {
-                            catch_globals.push(*offset as usize);
-                        }
+                        catch_globals.push(global.0);
                         boundaries.insert(start);
                         boundaries.insert(start + 1);
                         start += 1;
@@ -315,7 +331,7 @@ impl ControlFlowGraph {
                     Opcode::Switch { offsets, end, .. } => {
                         for (case, offset) in offsets.iter().enumerate() {
                             add(
-                                node_for_target(jump_target(
+                                node_for_target(switch_target(
                                     function_index,
                                     len,
                                     opcode_index,
@@ -325,7 +341,12 @@ impl ControlFlowGraph {
                             );
                         }
                         add(
-                            node_for_target(jump_target(function_index, len, opcode_index, *end)?)?,
+                            node_for_target(switch_target(
+                                function_index,
+                                len,
+                                opcode_index,
+                                *end,
+                            )?)?,
                             EdgeKind::SwitchDefault,
                         );
                     }
@@ -551,9 +572,21 @@ impl ControlFlowGraph {
                     Opcode::JAlways { offset } => add_target(*offset, EdgeKind::Jump)?,
                     Opcode::Switch { offsets, end, .. } => {
                         for (case, offset) in offsets.iter().enumerate() {
-                            add_target(*offset, EdgeKind::SwitchCase(case))?;
+                            let target = switch_target(
+                                self.function_index,
+                                self.instruction_count,
+                                opcode_index,
+                                *offset,
+                            )?;
+                            expected.insert((node_for_target(target)?, EdgeKind::SwitchCase(case)));
                         }
-                        add_target(*end, EdgeKind::SwitchDefault)?;
+                        let target = switch_target(
+                            self.function_index,
+                            self.instruction_count,
+                            opcode_index,
+                            *end,
+                        )?;
+                        expected.insert((node_for_target(target)?, EdgeKind::SwitchDefault));
                     }
                     Opcode::Ret { .. } => {
                         expected.insert((NodeId::Exit, EdgeKind::Return));
@@ -1142,7 +1175,9 @@ mod tests {
                 exc: Reg(1),
                 offset: 4,
             },
-            Opcode::Catch { offset: 7 },
+            Opcode::Catch {
+                global: hlbc::types::RefGlobal(7),
+            },
             Opcode::Nop,
             Opcode::EndTrap { exc: Reg(1) },
             Opcode::JAlways { offset: 1 },
@@ -1277,7 +1312,11 @@ mod tests {
                 .map(|(index, offset)| match index % 5 {
                     0 => Opcode::JAlways { offset: offset as i32 },
                     1 => Opcode::JFalse { cond: Reg(0), offset: offset as i32 },
-                    2 => Opcode::Switch { reg: Reg(0), offsets: vec![offset as i32], end: 0 },
+                    2 => Opcode::Switch {
+                        reg: Reg(0),
+                        offsets: vec![u32::from(offset.unsigned_abs())],
+                        end: 0,
+                    },
                     3 => Opcode::Nop,
                     _ => Opcode::Ret { ret: Reg(0) },
                 })

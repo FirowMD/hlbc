@@ -5,6 +5,7 @@ use std::path::Path;
 use std::str::from_utf8;
 
 use byteorder::{LittleEndian, ReadBytesExt};
+use indexmap::IndexMap;
 
 use crate::types::{
     EnumConstruct, Function, Native, ObjField, ObjProto, RefField, RefFloat, RefInt, RefString,
@@ -16,7 +17,7 @@ use crate::{Error, Result};
 const MAX_TABLE_ITEMS: usize = 16 * 1024 * 1024;
 const MAX_BLOB_BYTES: usize = 512 * 1024 * 1024;
 
-fn checked_count(r: &mut impl Read, kind: &'static str) -> Result<usize> {
+pub(crate) fn checked_count(r: &mut impl Read, kind: &'static str) -> Result<usize> {
     let count = read_varu(r)? as usize;
     if count > MAX_TABLE_ITEMS {
         Err(Error::CountLimit {
@@ -85,10 +86,10 @@ impl Bytecode {
             )));
         }
         let version = r.read_u8()?;
-        if version < 4 || version > 5 {
+        if version < 2 || version > 5 {
             return Err(Error::UnsupportedVersion {
                 version,
-                min: 4,
+                min: 2,
                 max: 5,
             });
         }
@@ -292,10 +293,12 @@ impl Bytecode {
         let mut fnames = HashMap::with_capacity(functions.len());
         for (i, f) in functions.iter().enumerate() {
             // FIXME duplicates ?
-            let name = strings
-                .get(f.name.0)
-                .ok_or_else(|| invalid_ref("function name", f.name.0, strings.len()))?;
-            fnames.insert(name.clone(), i);
+            if !f.name.is_null() {
+                let name = strings
+                    .get(f.name.0)
+                    .ok_or_else(|| invalid_ref("function name", f.name.0, strings.len()))?;
+                fnames.insert(name.clone(), i);
+            }
         }
         let entry = findexes
             .get(entrypoint.0)
@@ -429,9 +432,16 @@ impl TypeObj {
                 pindex: read_vari(r)?,
             });
         }
-        let mut bindings = HashMap::with_capacity(nbindings);
+        let mut bindings = IndexMap::with_capacity(nbindings);
         for _ in 0..nbindings {
-            bindings.insert(RefField::read(r)?, RefFun::read(r)?);
+            let field = RefField::read(r)?;
+            let function = RefFun::read(r)?;
+            if bindings.insert(field, function).is_some() {
+                return Err(Error::MalformedBytecode(format!(
+                    "Duplicate object binding for field {}",
+                    field.0
+                )));
+            }
         }
         Ok(TypeObj {
             name,
@@ -504,6 +514,7 @@ impl Type {
             20 => Ok(Method(TypeFun::read(r)?)),
             21 => Ok(Struct(TypeObj::read(r)?)),
             22 => Ok(Packed(RefType::read(r)?)),
+            23 => Ok(Guid),
             other => Err(Error::MalformedBytecode(format!(
                 "Invalid type kind '{other}'"
             ))),
@@ -654,10 +665,21 @@ fn read_strings(r: &mut impl Read, nstrings: usize) -> Result<Vec<Str>> {
                 string_data.len()
             )));
         }
+        if string_data[end - 1] != 0 {
+            return Err(Error::MalformedBytecode(
+                "String table entry is missing its NUL delimiter".into(),
+            ));
+        }
         strings.push(Str::from_ref_counted(std::sync::Arc::<str>::from(
             from_utf8(&string_data[acc..end - 1])?,
         )));
         acc += ssize;
+    }
+    if acc != string_data.len() {
+        return Err(Error::MalformedBytecode(format!(
+            "String table contains {} unreferenced trailing bytes",
+            string_data.len() - acc
+        )));
     }
     Ok(strings)
 }
@@ -693,7 +715,16 @@ mod tests {
         let Some(path) = std::env::var_os("HLBC_HLBOOT") else {
             return;
         };
-        assert!(Bytecode::from_file(path).is_ok());
+        let code = Bytecode::from_file(&path)
+            .unwrap_or_else(|error| panic!("{}: {error:?}", std::path::Path::new(&path).display()));
+        let original = fs::read(&path).expect("read stress input");
+        let mut serialized = Vec::new();
+        code.serialize(&mut serialized)
+            .expect("serialize stress input");
+        assert_eq!(
+            serialized, original,
+            "stress input changed during round trip"
+        );
     }
 
     #[test]

@@ -169,6 +169,7 @@ fn haxe_type_value(code: &Bytecode, ty: &Type, active: &mut BTreeSet<usize>) -> 
         Type::Enum { name, .. } => HaxeType::Named(source_type_name(code.get(*name).as_ref())),
         Type::Null(inner) => HaxeType::Nullable(Box::new(haxe_type_inner(code, *inner, active))),
         Type::Packed(inner) => HaxeType::Wrapped(Box::new(haxe_type_inner(code, *inner, active))),
+        Type::Guid => HaxeType::Diagnostic("HashLink guid".to_owned()),
     }
 }
 

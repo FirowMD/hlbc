@@ -276,12 +276,25 @@ fn read_variant(enum_name: &Ident, v: &Variant) -> TokenStream {
         "JumpOffset" => quote! {
             #rvi32
         },
+        "SwitchOffset" => quote! {
+            #rvu32
+        },
         "Vec<JumpOffset>" => quote! {
             {
                 let n = #rvu32 as usize;
                 let mut offsets = Vec::with_capacity(n);
                 for _ in 0..n {
                     offsets.push(#rvi32 as JumpOffset);
+                }
+                offsets
+            }
+        },
+        "Vec<SwitchOffset>" => quote! {
+            {
+                let n = crate::read::checked_count(r, "switch offset")?;
+                let mut offsets = Vec::with_capacity(n);
+                for _ in 0..n {
+                    offsets.push(#rvu32 as SwitchOffset);
                 }
                 offsets
             }
@@ -352,6 +365,12 @@ fn write_variant(enum_name: &Ident, v: &Variant, i: u8) -> TokenStream {
             "JumpOffset" => quote! {
                 write_var(w, *#fname as i32)?;
             },
+            "SwitchOffset" => quote! {
+                write_var(w, i32::try_from(*#fname).map_err(|_| crate::Error::ValueOutOfBounds {
+                    value: i32::MAX,
+                    limit: 0x20000000,
+                })?)?;
+            },
             "Vec<JumpOffset>" => quote! {
                 {
                     write_var(w, #fname.len() as i32)?;
@@ -360,12 +379,28 @@ fn write_variant(enum_name: &Ident, v: &Variant, i: u8) -> TokenStream {
                     }
                 }
             },
+            "Vec<SwitchOffset>" => quote! {
+                {
+                    crate::write::write_count(w, #fname.len(), "switch offset")?;
+                    for r__ in #fname {
+                        write_var(w, i32::try_from(*r__).map_err(|_| crate::Error::ValueOutOfBounds {
+                            value: i32::MAX,
+                            limit: 0x20000000,
+                        })?)?;
+                    }
+                }
+            },
             "Reg" => quote! {
                 write_var(w, #fname.0 as i32)?;
             },
             "Vec<Reg>" => quote! {
                 {
-                    w.write_u8(#fname.len() as u8)?;
+                    let count__ = u8::try_from(#fname.len()).map_err(|_| crate::Error::CountLimit {
+                        kind: "opcode register argument",
+                        count: #fname.len(),
+                        limit: u8::MAX as usize,
+                    })?;
+                    w.write_u8(count__)?;
                     for r__ in #fname {
                         write_var(w, r__.0 as i32)?;
                     }

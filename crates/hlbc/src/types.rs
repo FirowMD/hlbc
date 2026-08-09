@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::ops::Index;
 
 use crate::{AdjustReferences, Bytecode, IndexMapping, Opcode, Resolve, Str};
@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 
 /// Offset for a jump instruction. Can be negative, indicating a backward jump.
 pub type JumpOffset = i32;
+
+/// Non-negative relative offset used by the wire format of `OSwitch`.
+pub type SwitchOffset = u32;
 
 pub type InlineInt = i32;
 pub type InlineBool = bool;
@@ -54,16 +57,15 @@ impl RefBytes {
 pub struct RefString(pub usize);
 
 impl RefString {
-    /// If a [RefString] is null, it indicates an element has no name
+    /// Some derived, non-wire metadata uses string zero as an unnamed marker.
+    /// Wire-format string references, including zero, are ordinary pool indexes.
     pub fn is_null(&self) -> bool {
         self.0 == 0
     }
 
     /// Adjust the string reference by an offset
     pub fn adjust(&mut self, offset: usize) {
-        if !self.is_null() {
-            self.0 += offset;
-        }
+        self.0 += offset;
     }
 }
 
@@ -89,7 +91,10 @@ pub struct ObjField {
 
 impl ObjField {
     pub fn name(&self, code: &Bytecode) -> Str {
-        code.get(self.name)
+        code.strings
+            .get(self.name.0)
+            .cloned()
+            .unwrap_or_else(|| Str::from_borrowed("<none>"))
     }
 }
 
@@ -199,7 +204,8 @@ pub struct TypeObj {
     /// Methods in this class
     pub protos: Vec<ObjProto>,
     /// Functions bounds to class fields
-    pub bindings: HashMap<RefField, RefFun>,
+    /// Field-to-function bindings in wire order.
+    pub bindings: IndexMap<RefField, RefFun>,
 
     // Data below is not stored in the bytecode
     /// Fields including parents in the hierarchy
@@ -227,7 +233,9 @@ impl AdjustReferences for TypeObj {
         if let Some(ref mut super_type) = self.super_ {
             super_type.adjust(mapping.type_offset);
         }
-        self.global.adjust(mapping.global_offset);
+        if self.global.0 > 0 {
+            self.global.0 += mapping.global_offset;
+        }
 
         for field in &mut self.own_fields {
             field.adjust_references(mapping);
@@ -240,7 +248,7 @@ impl AdjustReferences for TypeObj {
         }
 
         // Adjust field->function bindings
-        let mut new_bindings = HashMap::new();
+        let mut new_bindings = IndexMap::new();
         for (field, fun) in &self.bindings {
             let mut new_field = *field;
             let mut new_fun = *fun;
@@ -300,6 +308,8 @@ pub enum Type {
     Struct(TypeObj),
     /// Packed wrapper
     Packed(RefType),
+    /// Opaque 64-bit GUID value
+    Guid,
 }
 
 impl Type {
@@ -462,7 +472,9 @@ impl AdjustReferences for Type {
                 constructs,
             } => {
                 mapping.apply_string(name);
-                global.adjust(mapping.global_offset);
+                if global.0 > 0 {
+                    global.0 += mapping.global_offset;
+                }
                 for construct in constructs {
                     construct.adjust_references(mapping);
                 }
@@ -629,7 +641,13 @@ impl Function {
 
     /// Convenience method to resolve the function name
     pub fn name(&self, code: &Bytecode) -> Str {
-        code.get(self.name)
+        if self.name.is_null() {
+            return Str::from_borrowed("<none>");
+        }
+        code.strings
+            .get(self.name.0)
+            .cloned()
+            .unwrap_or_else(|| Str::from_borrowed("<none>"))
     }
 
     /// Get the function signature type
@@ -773,7 +791,10 @@ impl AdjustReferences for Function {
     fn adjust_references(&mut self, mapping: &IndexMapping) {
         self.t.adjust(mapping.type_offset);
         self.findex.adjust(mapping.function_offset);
-        mapping.apply_string(&mut self.name);
+        // Function names are derived metadata and use zero as "unnamed".
+        if !self.name.is_null() {
+            mapping.apply_string(&mut self.name);
+        }
 
         if let Some(ref mut parent) = self.parent {
             parent.adjust(mapping.type_offset);
@@ -895,12 +916,13 @@ impl<'a> FunPtr<'a> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstantDef {
     pub global: RefGlobal,
+    /// Positional initializer values. Entry `i` initializes object field `i`;
+    /// the referenced pool is selected by that field's type.
     pub fields: Vec<usize>,
 }
 
 impl AdjustReferences for ConstantDef {
     fn adjust_references(&mut self, mapping: &IndexMapping) {
         self.global.adjust(mapping.global_offset);
-        // fields are indexes into the field array of the type, not direct references
     }
 }

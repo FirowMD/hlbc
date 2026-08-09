@@ -23,6 +23,7 @@ fmtools = { workspace = true }
 hlbc-derive = { workspace = true }
 # Search for the magic header
 memchr = { workspace = true }
+indexmap = { workspace = true }
 # Graph utilities
 petgraph = { workspace = true, optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
