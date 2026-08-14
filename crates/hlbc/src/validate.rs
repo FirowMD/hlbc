@@ -69,8 +69,11 @@ impl Bytecode {
             validate_function_type(self, native.t, "native type")?;
             reference("native function", native.findex.0, self.findexes.len())?;
         }
+        // HashLink v2-v4 compiler output uses legacy storage and calling conventions
+        // which cannot be verified from the declared register types alone.
+        let enforce_semantics = self.version >= 5;
         for function in &self.functions {
-            validate_function_inner(self, function, true, true)?;
+            validate_function_inner(self, function, true, enforce_semantics)?;
         }
         if let Some(constants) = &self.constants {
             for constant in constants {
@@ -387,7 +390,15 @@ fn validate_function_inner(
         }
     }
     for (index, opcode) in function.ops.iter().enumerate() {
-        validate_opcode(code, function, index, opcode, enforce_semantics)?;
+        validate_opcode(code, function, index, opcode, enforce_semantics).map_err(|error| {
+            match error {
+                Error::MalformedBytecode(message) => Error::MalformedBytecode(format!(
+                    "Function {} opcode {index} ({opcode:?}): {message}",
+                    function.findex.0
+                )),
+                error => error,
+            }
+        })?;
     }
     Ok(())
 }
@@ -476,6 +487,24 @@ fn types_compatible(code: &Bytecode, actual: RefType, expected: RefType) -> bool
     if matches!(actual_type, Type::Dyn) || matches!(expected_type, Type::Dyn) {
         return true;
     }
+    if matches!(
+        (actual_type, expected_type),
+        (Type::Void, Type::Void)
+            | (Type::UI8, Type::UI8)
+            | (Type::UI16, Type::UI16)
+            | (Type::I32, Type::I32)
+            | (Type::I64, Type::I64)
+            | (Type::F32, Type::F32)
+            | (Type::F64, Type::F64)
+            | (Type::Bool, Type::Bool)
+            | (Type::Bytes, Type::Bytes)
+            | (Type::Array, Type::Array)
+            | (Type::Type, Type::Type)
+            | (Type::DynObj, Type::DynObj)
+            | (Type::Guid, Type::Guid)
+    ) {
+        return true;
+    }
     match (actual_type, expected_type) {
         (Type::Null(inner), _) => types_compatible(code, *inner, expected),
         (_, Type::Null(inner)) => types_compatible(code, actual, *inner),
@@ -508,6 +537,105 @@ fn types_compatible(code: &Bytecode, actual: RefType, expected: RefType) -> bool
                 && types_compatible(code, actual.ret, expected.ret)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_primitive_types_are_compatible() {
+        let primitives = [
+            Type::Void,
+            Type::UI8,
+            Type::UI16,
+            Type::I32,
+            Type::I64,
+            Type::F32,
+            Type::F64,
+            Type::Bool,
+            Type::Bytes,
+            Type::Dyn,
+            Type::Array,
+            Type::Type,
+            Type::DynObj,
+            Type::Guid,
+        ];
+        let mut code = Bytecode::default();
+
+        for primitive in primitives {
+            code.types = vec![primitive.clone(), primitive];
+            assert!(types_compatible(&code, RefType(0), RefType(1)));
+        }
+
+        code.types = vec![Type::Array, Type::Bytes];
+        assert!(!types_compatible(&code, RefType(0), RefType(1)));
+    }
+
+    #[test]
+    fn legacy_bytecode_uses_structural_validation() {
+        use crate::types::Native;
+        use crate::{RefFun, RefString, Str};
+
+        let mut code = Bytecode::default();
+        code.version = 4;
+        code.bytes = None;
+        code.constants = Some(Vec::new());
+        code.strings = vec![Str::from_borrowed("")];
+        code.types = vec![
+            Type::Fun(TypeFun {
+                args: Vec::new(),
+                ret: RefType(4),
+            }),
+            Type::Fun(TypeFun {
+                args: vec![RefType(2)],
+                ret: RefType(4),
+            }),
+            Type::Bool,
+            Type::Ref(RefType(2)),
+            Type::Void,
+        ];
+        code.natives = vec![Native {
+            name: RefString(0),
+            lib: RefString(0),
+            t: RefType(1),
+            findex: RefFun(1),
+        }];
+        code.functions = vec![Function {
+            t: RefType(0),
+            findex: RefFun(0),
+            regs: vec![RefType(4), RefType(3)],
+            ops: vec![
+                Opcode::Call1 {
+                    dst: Reg(0),
+                    fun: RefFun(1),
+                    arg0: Reg(1),
+                },
+                Opcode::Ret { ret: Reg(0) },
+            ],
+            debug_info: None,
+            assigns: None,
+            name: RefString(0),
+            parent: None,
+        }];
+        code.entrypoint = RefFun(0);
+        code.findexes = vec![RefFunKnown::Fun(0), RefFunKnown::Native(0)];
+
+        for version in 2..=4 {
+            code.version = version;
+            code.constants = (version >= 4).then(Vec::new);
+
+            let mut serialized = Vec::new();
+            code.serialize(&mut serialized).unwrap();
+            let decoded = Bytecode::deserialize(serialized.as_slice()).unwrap();
+            assert_eq!(decoded.version, version);
+        }
+
+        code.version = 5;
+        code.bytes = Some((Vec::new(), Vec::new()));
+        code.constants = Some(Vec::new());
+        assert!(code.validate().is_err());
     }
 }
 
