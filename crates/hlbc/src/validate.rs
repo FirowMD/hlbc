@@ -487,27 +487,30 @@ fn types_compatible(code: &Bytecode, actual: RefType, expected: RefType) -> bool
     if matches!(actual_type, Type::Dyn) || matches!(expected_type, Type::Dyn) {
         return true;
     }
-    if matches!(
-        (actual_type, expected_type),
-        (Type::Void, Type::Void)
-            | (Type::UI8, Type::UI8)
-            | (Type::UI16, Type::UI16)
-            | (Type::I32, Type::I32)
-            | (Type::I64, Type::I64)
-            | (Type::F32, Type::F32)
-            | (Type::F64, Type::F64)
-            | (Type::Bool, Type::Bool)
-            | (Type::Bytes, Type::Bytes)
-            | (Type::Array, Type::Array)
-            | (Type::Type, Type::Type)
-            | (Type::DynObj, Type::DynObj)
-            | (Type::Guid, Type::Guid)
-    ) {
+    if primitive_types_compatible(actual_type, expected_type) {
         return true;
     }
     match (actual_type, expected_type) {
         (Type::Null(inner), _) => types_compatible(code, *inner, expected),
         (_, Type::Null(inner)) => types_compatible(code, actual, *inner),
+        (Type::Packed(inner), _) => types_compatible(code, *inner, expected),
+        (
+            Type::Virtual {
+                fields: actual_fields,
+            },
+            Type::Virtual {
+                fields: expected_fields,
+            },
+        ) => {
+            expected_fields.len() < actual_fields.len()
+                && actual_fields
+                    .iter()
+                    .zip(expected_fields)
+                    .all(|(actual, expected)| {
+                        actual.name == expected.name
+                            && types_same(code, actual.t, expected.t, &mut HashSet::new())
+                    })
+        }
         (Type::Obj(_) | Type::Struct(_), Type::Obj(_) | Type::Struct(_)) => {
             let mut current = Some(actual);
             let mut seen = HashSet::new();
@@ -538,6 +541,28 @@ fn types_compatible(code: &Bytecode, actual: RefType, expected: RefType) -> bool
         }
         _ => false,
     }
+}
+
+fn primitive_types_compatible(actual: &Type, expected: &Type) -> bool {
+    // HashLink compares these primitive types by kind, not by their index in
+    // the serialized type table. Valid bytecode may contain duplicate entries.
+    matches!(
+        actual,
+        Type::Void
+            | Type::UI8
+            | Type::UI16
+            | Type::I32
+            | Type::I64
+            | Type::F32
+            | Type::F64
+            | Type::Bool
+            | Type::Bytes
+            | Type::Dyn
+            | Type::Array
+            | Type::Type
+            | Type::DynObj
+            | Type::Guid
+    ) && std::mem::discriminant(actual) == std::mem::discriminant(expected)
 }
 
 #[cfg(test)]
@@ -1309,5 +1334,88 @@ fn validate_opcode(
         }
         Opcode::Catch { global } => reference("catch type global", global.0, code.globals.len()),
         Opcode::Label | Opcode::Assert | Opcode::Nop | Opcode::Asm { .. } => Ok(()),
+    }
+}
+
+fn types_same(
+    code: &Bytecode,
+    actual: RefType,
+    expected: RefType,
+    seen: &mut HashSet<(usize, usize)>,
+) -> bool {
+    if actual == expected {
+        return true;
+    }
+    if !seen.insert((actual.0, expected.0)) {
+        return true;
+    }
+    let (Some(actual), Some(expected)) = (code.types.get(actual.0), code.types.get(expected.0))
+    else {
+        return false;
+    };
+    if primitive_types_compatible(actual, expected) {
+        return true;
+    }
+    match (actual, expected) {
+        (Type::Ref(actual), Type::Ref(expected))
+        | (Type::Null(actual), Type::Null(expected))
+        | (Type::Packed(actual), Type::Packed(expected)) => {
+            types_same(code, *actual, *expected, seen)
+        }
+        (Type::Fun(actual), Type::Fun(expected))
+        | (Type::Method(actual), Type::Method(expected)) => {
+            actual.args.len() == expected.args.len()
+                && actual
+                    .args
+                    .iter()
+                    .zip(&expected.args)
+                    .all(|(&actual, &expected)| types_same(code, actual, expected, seen))
+                && types_same(code, actual.ret, expected.ret, seen)
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn wider_virtual_type_is_compatible_with_matching_prefix() {
+        let mut code = Bytecode::default();
+        code.strings = vec!["first".into(), "second".into(), "third".into()];
+        code.types = vec![Type::I32, Type::I32];
+        let fields = vec![
+            crate::types::ObjField {
+                name: crate::types::RefString(0),
+                t: RefType(0),
+            },
+            crate::types::ObjField {
+                name: crate::types::RefString(1),
+                t: RefType(0),
+            },
+            crate::types::ObjField {
+                name: crate::types::RefString(2),
+                t: RefType(0),
+            },
+        ];
+        code.types.push(Type::Virtual {
+            fields: fields.clone(),
+        });
+        code.types.push(Type::Virtual {
+            fields: fields[..2].to_vec(),
+        });
+
+        assert!(types_compatible(&code, RefType(2), RefType(3)));
+        assert!(!types_compatible(&code, RefType(3), RefType(2)));
+    }
+
+    #[test]
+    fn packed_source_is_compatible_with_its_inner_type() {
+        let mut code = Bytecode::default();
+        code.types = vec![Type::Bool, Type::Packed(RefType(0))];
+
+        assert!(types_compatible(&code, RefType(1), RefType(0)));
+        assert!(!types_compatible(&code, RefType(0), RefType(1)));
     }
 }
