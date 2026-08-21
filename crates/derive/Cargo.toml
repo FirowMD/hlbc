@@ -1,6 +1,6 @@
 [package]
 name = "hlbc-derive"
-version = "0.9.0"
+version = "0.9.1"
 description = "Procedural macros for the 'hlbc' crate"
 rust-version = "1.61"
 authors.workspace = true
